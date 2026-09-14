@@ -3,188 +3,182 @@ package bath
 import (
 	"errors"
 	"math/big"
+	"slices"
 
+	"github.com/tonkeeper/opentonapi/pkg/references"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/ton"
 )
 
-var DedustSwapJettonsStraw = Straw[BubbleJettonSwap]{
-	CheckFuncs: []bubbleCheck{IsJettonTransfer, JettonTransferOperation(abi.DedustSwapJettonOp), func(bubble *Bubble) bool {
-		transfer := bubble.Info.(BubbleJettonTransfer)
-		swap, ok := transfer.payload.Value.(abi.DedustSwapJettonPayload)
-		if !ok {
+func (s UniversalDedustStraw) Merge(b *Bubble) bool {
+	var steps abi.DedustSwapStep
+	var sender ton.AccountID
+	var out, in assetTransfer
+	if IsTx(b) && b.Info.(BubbleTx).operation(abi.DedustSwapMsgOp) {
+		tx := b.Info.(BubbleTx)
+		if tx.inputFrom == nil {
 			return false
 		}
-		to, err := ton.AccountIDFromTlb(swap.SwapParams.RecipientAddr)
-		if err != nil {
+		swap := tx.decodedBody.Value.(abi.DedustSwapMsgBody)
+		steps = swap.Step
+		sender = tx.inputFrom.Address
+		in.IsTon = true
+		in.Amount.SetInt64(int64(swap.Amount))
+	} else if IsJettonTransfer(b) && JettonTransferOperation(abi.DedustSwapJettonOp)(b) {
+		transfer := b.Info.(BubbleJettonTransfer)
+		if transfer.sender == nil {
 			return false
 		}
-		if to == nil {
-			return true
-		}
-		// A Dedust user may specify different address to receive resulting jettons. In that case it is not a swap.
-		if transfer.sender == nil || transfer.sender.Address != *to {
+		swap := transfer.payload.Value.(abi.DedustSwapJettonPayload)
+		steps = swap.Step
+		sender = transfer.sender.Address
+		in.Amount = big.Int(transfer.amount)
+		in.JettonMaster = transfer.master
+		in.JettonWallet = transfer.senderWallet
+	} else {
+		return false
+	}
+	expectStepsCount := s.countSteps(steps)
+	realStepsCount, failedSteps, swapsBubbles, payoutCommandBubble, err := s.recursiveProcessSteps(b)
+	if err != nil || failedSteps != 0 || expectStepsCount != realStepsCount {
+		return false
+	}
+	if !IsTx(payoutCommandBubble) || len(payoutCommandBubble.Children) < 1 {
+		return false
+	}
+	payoutCommand, ok := payoutCommandBubble.Info.(BubbleTx).decodedBody.Value.(abi.DedustPayoutFromPoolMsgBody)
+	if !ok {
+		return false
+	}
+	out.Amount = big.Int(payoutCommand.Amount)
+	payoutBubble := payoutCommandBubble.Children[0]
+	var payoutDestination Account
+	if IsTx(payoutBubble) && payoutBubble.Info.(BubbleTx).operation(abi.DedustPayoutMsgOp) {
+		out.IsTon = true
+		payoutDestination = payoutBubble.Info.(BubbleTx).account
+	} else if IsJettonTransfer(payoutBubble) {
+		transfer := payoutBubble.Info.(BubbleJettonTransfer)
+		out.JettonMaster = transfer.master
+		out.JettonWallet = transfer.senderWallet
+		out.Amount = big.Int(transfer.amount)
+		if transfer.recipient == nil {
 			return false
 		}
-		return true
-	}},
-	Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-		transfer := bubble.Info.(BubbleJettonTransfer)
-		newAction.Success = true
-		newAction.Dex = Dedust
-		if transfer.sender != nil {
-			newAction.UserWallet = transfer.sender.Address
+		payoutDestination = *transfer.recipient
+	} else {
+		return false
+	}
+
+	//omniston referral account
+	// кажется потом можно будет вынести в отдельную функцию, но пока не хочется
+	if payoutDestination.Is(abi.OmnistonReferral) && len(payoutBubble.Children) == 2 {
+		if out.IsTon {
+			referalBubble := payoutBubble.Children[0]
+			payoutBubble2 := payoutBubble.Children[1]
+
+			referalTx, ok1 := referalBubble.Info.(BubbleTx)
+			payoutBubble2tx, ok2 := payoutBubble2.Info.(BubbleTx)
+			if !(ok1 && ok2) ||
+				!(referalTx.operation(abi.DedustTonExcessesMsgOp) && payoutBubble2tx.operation(abi.DedustTonPayMsgOp)) &&
+					!(referalTx.operation(abi.ExcessMsgOp) && payoutBubble2tx.operation(abi.ExcessMsgOp)) {
+				return false
+			}
+			if referalTx.inputAmount < payoutBubble2tx.inputAmount {
+				swapsBubbles = append(swapsBubbles, payoutBubble2)
+				out.Amount.SetInt64(payoutBubble2tx.inputAmount)
+				payoutDestination = payoutBubble2tx.account
+			} else { //видимо перепутались рефералка и выплата. рефералка меньше чем выплата
+				swapsBubbles = append(swapsBubbles, referalBubble)
+				out.Amount.SetInt64(referalTx.inputAmount)
+				payoutDestination = referalTx.account
+			}
+		} else {
+			referalBubble := payoutBubble.Children[0]
+			payoutBubble2 := payoutBubble.Children[1]
+
+			referalTransfer, ok1 := referalBubble.Info.(BubbleTx)
+			if !ok1 {
+				referalBubble, payoutBubble2 = payoutBubble2, payoutBubble
+				referalTransfer, ok1 = referalBubble.Info.(BubbleTx)
+				if !ok1 || (referalTransfer.opCode == nil || *referalTransfer.opCode != 0x603f6e78) {
+					return false
+				}
+			}
+			payoutBubble2Transfer, ok2 := payoutBubble2.Info.(BubbleJettonTransfer)
+			if !ok2 || payoutBubble2Transfer.recipient == nil {
+				return false
+			}
+			payoutDestination = *payoutBubble2Transfer.recipient
+			out.Amount = big.Int(payoutBubble2Transfer.amount)
+			swapsBubbles = append(swapsBubbles, payoutBubble2)
+			if len(referalBubble.Children) == 1 && IsTx(referalBubble.Children[0]) && referalBubble.Children[0].Info.(BubbleTx).operation(abi.ExcessMsgOp) {
+				swapsBubbles = append(swapsBubbles, referalBubble.Children[0])
+				swapsBubbles = append(swapsBubbles, referalBubble)
+			}
 		}
-		newAction.In.JettonMaster = transfer.master
-		newAction.In.JettonWallet = transfer.senderWallet
-		newAction.In.Amount = big.Int(transfer.amount)
-		newAction.In.IsTon = transfer.isWrappedTon
-		if transfer.payload.Value.(abi.DedustSwapJettonPayload).Step.Params.KindOut {
-			return errors.New("dedust swap: wrong kind of limits") //not supported
+	}
+
+	// проверяем что не подменен адрес получателя свапа
+	if payoutDestination.Address != sender {
+		return false
+	}
+
+	//закончили все проверки и собрали данные. билдим выходной пузырь и мержим
+	toMerge := append(swapsBubbles, payoutCommandBubble, payoutBubble)
+	var newChildren []*Bubble
+	for i := range b.Children {
+		if !slices.Contains(toMerge, b.Children[i]) {
+			newChildren = append(newChildren, b.Children[i])
 		}
-		newAction.Out.Amount = big.Int(transfer.payload.Value.(abi.DedustSwapJettonPayload).Step.Params.Limit)
-		return nil
-	},
-	SingleChild: &Straw[BubbleJettonSwap]{
-		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.DedustSwapExternalMsgOp)},
-		Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-			newAction.Router = bubble.Info.(BubbleTx).account.Address
-			return nil
-		},
-		SingleChild: &Straw[BubbleJettonSwap]{
-			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.DedustPayoutFromPoolMsgOp), HasInterface(abi.DedustVault)},
-			SingleChild: &Straw[BubbleJettonSwap]{
-				CheckFuncs: []bubbleCheck{IsJettonTransfer},
-				Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-					newAction.Success = true
-					transfer := bubble.Info.(BubbleJettonTransfer)
-					newAction.Out.JettonMaster = transfer.master
-					newAction.Out.IsTon = transfer.isWrappedTon
-					newAction.Out.Amount = big.Int(transfer.amount)
-					newAction.Out.JettonWallet = transfer.recipientWallet
-					return nil
-				},
-			},
-		},
-	},
+	}
+	for i := range toMerge {
+		b.ValueFlow.Merge(toMerge[i].ValueFlow)
+		b.Accounts = append(b.Accounts, toMerge[i].Accounts...)
+		b.Transaction = append(b.Transaction, toMerge[i].Transaction...)
+		for j := range toMerge[i].Children { //прикрепляем детей от удаляемых баблов напрямую к родителю
+			tb := toMerge[i].Children[j]
+			if !slices.Contains(toMerge, tb) {
+				newChildren = append(newChildren, tb)
+			}
+		}
+	}
+	b.Children = newChildren
+	b.Info = BubbleJettonSwap{
+		Dex:        references.Dedust,
+		UserWallet: sender,
+		Router:     swapsBubbles[0].Info.(BubbleTx).account.Address,
+		Out:        out,
+		In:         in,
+		Success:    true,
+	}
+	return true
 }
 
-var DedustSwapToTONStraw = Straw[BubbleJettonSwap]{
-	CheckFuncs: []bubbleCheck{IsJettonTransfer, JettonTransferOperation(abi.DedustSwapJettonOp), func(bubble *Bubble) bool {
-		transfer := bubble.Info.(BubbleJettonTransfer)
-		swap, ok := transfer.payload.Value.(abi.DedustSwapJettonPayload)
-		if !ok {
-			return false
+// recursiveProcessSteps returns number of steps, number of fails, list of all txBubbles on pools, and last Bubble with payout command
+func (s UniversalDedustStraw) recursiveProcessSteps(b *Bubble) (int, int, []*Bubble, *Bubble, error) {
+	if len(b.Children) < 1 {
+		return 0, 0, nil, nil, errors.New("unexpected end of swap")
+	}
+	child := b.Children[0]
+	if !IsTx(child) {
+		return 0, 0, nil, nil, errors.New("unexpected end of swap")
+	}
+	tx := child.Info.(BubbleTx)
+	if tx.account.Is(abi.DedustPool) {
+		step, fails, deepSwaps, endBubble, err := s.recursiveProcessSteps(child)
+		if tx.findExternalOut(abi.DedustSwapMsgOp) == nil {
+			fails++
 		}
-		to, err := ton.AccountIDFromTlb(swap.SwapParams.RecipientAddr)
-		if err != nil {
-			return false
-		}
-		if to == nil {
-			return true
-		}
-		// A Dedust user may specify different address to receive resulting TON. In that case it is not a swap.
-		if transfer.sender == nil || transfer.sender.Address != *to {
-			return false
-		}
-		return true
-	}},
-	Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-		transfer := bubble.Info.(BubbleJettonTransfer)
-		newAction.Success = true
-		newAction.Dex = Dedust
-		if transfer.sender != nil {
-			newAction.UserWallet = transfer.sender.Address
-		}
-		newAction.In.JettonMaster = transfer.master
-		newAction.In.JettonWallet = transfer.senderWallet
-		newAction.In.Amount = big.Int(transfer.amount)
-		newAction.In.IsTon = transfer.isWrappedTon
-		if transfer.payload.Value.(abi.DedustSwapJettonPayload).Step.Params.KindOut {
-			return errors.New("dedust swap: wrong kind of limits") //not supported
-		}
-		return nil
-	},
-	SingleChild: &Straw[BubbleJettonSwap]{
-		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.DedustSwapExternalMsgOp)},
-		Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-			newAction.Router = bubble.Info.(BubbleTx).account.Address
-			return nil
-		},
-		SingleChild: &Straw[BubbleJettonSwap]{
-			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.DedustPayoutFromPoolMsgOp), HasInterface(abi.DedustVault)},
-			SingleChild: &Straw[BubbleJettonSwap]{
-				CheckFuncs: []bubbleCheck{IsTx, HasOperation("DedustPayout")},
-				Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-					transfer := bubble.Info.(BubbleTx)
-					newAction.Out.IsTon = true
-					newAction.Out.Amount.SetInt64(transfer.inputAmount)
-					return nil
-				},
-			},
-		},
-	},
+		return step + 1, fails, append(deepSwaps, child), endBubble, err
+	}
+	return 0, 0, nil, child, nil
 }
 
-var DedustSwapFromTONStraw = Straw[BubbleJettonSwap]{
-	CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.DedustSwapJettonOp), func(bubble *Bubble) bool {
-		tx := bubble.Info.(BubbleTx)
-		swap, ok := tx.decodedBody.Value.(abi.DedustSwapMsgBody)
-		if !ok {
-			return false
-		}
-		to, err := ton.AccountIDFromTlb(swap.SwapParams.RecipientAddr)
-		if err != nil {
-			return false
-		}
-		if to == nil {
-			return true
-		}
-		// A Dedust user may specify different address to receive resulting jettons. In that case it is not a swap.
-		if tx.inputFrom == nil || tx.inputFrom.Address != *to {
-			return false
-		}
-		return true
-	}},
-	Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-		transfer := bubble.Info.(BubbleTx)
-		newAction.Success = true
-		newAction.Dex = Dedust
-		if transfer.inputFrom != nil {
-			newAction.UserWallet = transfer.inputFrom.Address
-		}
-		newAction.In.IsTon = true
-		newAction.In.Amount.SetInt64(transfer.inputAmount)
-		return nil
-	},
-	SingleChild: &Straw[BubbleJettonSwap]{
-		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.DedustSwapExternalMsgOp), HasInterface(abi.DedustPool)},
-		Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-			newAction.Router = bubble.Info.(BubbleTx).account.Address
-			return nil
-		},
-		SingleChild: &Straw[BubbleJettonSwap]{
-			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.DedustPayoutFromPoolMsgOp), HasInterface(abi.DedustVault)},
-			SingleChild: &Straw[BubbleJettonSwap]{
-				CheckFuncs: []bubbleCheck{Or(IsJettonTransfer, IsTx)},
-				Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-					if IsJettonTransfer(bubble) {
-						transfer := bubble.Info.(BubbleJettonTransfer)
-						newAction.Out.JettonMaster = transfer.master
-						newAction.Out.Amount = big.Int(transfer.amount)
-						newAction.Out.JettonWallet = transfer.recipientWallet
-						newAction.UserWallet = transfer.recipient.Address
-					} else {
-						transfer := bubble.Info.(BubbleTx)
-						newAction.Success = false
-						newAction.Out.IsTon = true
-						newAction.Out.Amount.SetInt64(transfer.inputAmount)
-						newAction.Out.JettonWallet = transfer.inputFrom.Address
-						newAction.UserWallet = transfer.account.Address
-					}
-					return nil
-				},
-			},
-		},
-	},
+func (s UniversalDedustStraw) countSteps(step abi.DedustSwapStep) int {
+	if step.Params.Next == nil {
+		return 1
+	}
+	return s.countSteps(*step.Params.Next) + 1
 }
+
+type UniversalDedustStraw struct{}

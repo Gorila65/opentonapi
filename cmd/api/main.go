@@ -12,16 +12,17 @@ import (
 	"github.com/tonkeeper/opentonapi/pkg/blockchain"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
 	"github.com/tonkeeper/opentonapi/pkg/config"
+	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/litestorage"
-	"github.com/tonkeeper/opentonapi/pkg/pusher/sources"
+	"github.com/tonkeeper/opentonapi/pkg/pyth"
 	"github.com/tonkeeper/opentonapi/pkg/spam"
 	"github.com/tonkeeper/tongo"
+	ton "github.com/tonkeeper/tongo/config"
 	"github.com/tonkeeper/tongo/liteapi"
 	"go.uber.org/zap"
 )
 
 func main() {
-
 	cfg := config.Load()
 	log := app.Logger(cfg.App.LogLevel)
 
@@ -31,19 +32,40 @@ func main() {
 	var client *liteapi.Client
 	if len(cfg.App.LiteServers) == 0 {
 		log.Warn("USING PUBLIC CONFIG for NewLiteStorage! BE CAREFUL!")
-		client, err = liteapi.NewClientWithDefaultMainnet()
+		client, err = liteapi.NewClient(
+			liteapi.Mainnet(),
+			liteapi.WithObserver(litestorage.LiteclientObserver{}),
+		)
 	} else {
-		client, err = liteapi.NewClient(liteapi.WithLiteServers(cfg.App.LiteServers))
+		client, err = liteapi.NewClient(
+			liteapi.WithLiteServers(cfg.App.LiteServers),
+			liteapi.WithObserver(litestorage.LiteclientObserver{}),
+		)
 	}
 	if err != nil {
 		log.Fatal("failed to create liteapi client", zap.Error(err))
 	}
+	var archiveLiteServers []ton.LiteServer
+	if len(cfg.App.ArchiveLiteServers) != 0 {
+		archiveLiteServers = cfg.App.ArchiveLiteServers
+	} else if len(cfg.App.LiteServers) != 0 {
+		archiveLiteServers = cfg.App.LiteServers
+	} else {
+		var opt liteapi.Options
+		liteapi.Mainnet()(&opt)
+		archiveLiteServers = opt.LiteServers
+	}
 
+	pythFeeds := pyth.GetUpdatedWithFallback(context.Background(), log)
 	storage, err := litestorage.NewLiteStorage(
 		log,
-		client,
+		core.LiteAPIClient(client),
+		litestorage.WithPreloadBlocks([]tongo.BlockID{
+			tongo.MustParseBlockID("(0,8000000000000000,72945279)"),
+		}),
 		litestorage.WithPreloadAccounts(cfg.App.Accounts),
 		litestorage.WithBlockChannel(storageBlockCh),
+		litestorage.WithPythPriceFeeds(pythFeeds),
 	)
 	book := addressbook.NewAddressBook(log, config.AddressPath, config.JettonPath, config.CollectionPath, storage)
 	// The executor is used to resolve DNS records.
@@ -52,13 +74,7 @@ func main() {
 	if err != nil {
 		log.Fatal("storage init", zap.Error(err))
 	}
-	// mempool receives a copy of any payload that goes through our API method /v2/blockchain/message
-	mempool := sources.NewMemPool(log)
-	mempoolCh := mempool.Run(context.TODO())
-
-	msgSender, err := blockchain.NewMsgSender(log, cfg.App.LiteServers, map[string]chan<- blockchain.ExtInMsgCopy{
-		"mempool": mempoolCh,
-	})
+	msgSender, err := blockchain.NewMsgSender(log, cfg.App.LiteServers, map[string]chan<- blockchain.ExtInMsgCopy{})
 	if err != nil {
 		log.Fatal("failed to create msg sender", zap.Error(err))
 	}
@@ -70,27 +86,18 @@ func main() {
 		api.WithMessageSender(msgSender),
 		api.WithSpamFilter(spamFilter),
 		api.WithTonConnectSecret(cfg.TonConnect.Secret),
+		api.WithArchiveLiteServers(archiveLiteServers),
+		api.WithPublicAPIURL(cfg.PublicAPIURL),
 	)
 	if err != nil {
 		log.Fatal("failed to create api handler", zap.Error(err))
 	}
-	source := sources.NewBlockchainSource(log, client)
-	pusherBlockCh := source.Run(context.TODO())
-
-	tracer := sources.NewTracer(log, storage, source)
-	go tracer.Run(context.TODO())
-
-	idx := indexer.New(log, client)
+	idx := indexer.New(log, core.LiteAPIClient(client))
 	go idx.Run(context.TODO(), []chan indexer.IDandBlock{
-		pusherBlockCh,
 		storageBlockCh,
 	})
 
-	server, err := api.NewServer(log, h,
-		api.WithTransactionSource(source),
-		api.WithBlockHeadersSource(source),
-		api.WithTraceSource(tracer),
-		api.WithMemPool(mempool))
+	server, err := api.NewServer(log, h)
 	if err != nil {
 		log.Fatal("failed to create api handler", zap.Error(err))
 	}
@@ -107,4 +114,5 @@ func main() {
 
 	log.Warn("start server", zap.Int("port", cfg.API.Port))
 	server.Run(fmt.Sprintf(":%d", cfg.API.Port), cfg.API.UnixSockets)
+	select {}
 }

@@ -2,7 +2,11 @@ package api
 
 import (
 	"context"
+	"os"
 	"testing"
+
+	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/opentonapi/pkg/spam"
 
 	"github.com/tonkeeper/opentonapi/pkg/chainstate"
 	pkgTesting "github.com/tonkeeper/opentonapi/pkg/testing"
@@ -13,12 +17,15 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tonkeeper/opentonapi/pkg/addressbook"
-	"github.com/tonkeeper/opentonapi/pkg/config"
 	"github.com/tonkeeper/opentonapi/pkg/litestorage"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
 )
 
 func TestHandler_GetRawAccount(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name           string
 		params         oas.GetBlockchainRawAccountParams
@@ -59,9 +66,14 @@ func TestHandler_GetRawAccount(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
-			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					return addressbook.KnownAddress{}, false
+				},
+			}
+			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book))
 			require.Nil(t, err)
 			account, err := h.GetBlockchainRawAccount(context.Background(), tt.params)
 			require.Nil(t, err)
@@ -74,7 +86,105 @@ func TestHandler_GetRawAccount(t *testing.T) {
 	}
 }
 
+func TestHandler_GetBlockchainRawAccounts(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
+	tests := []struct {
+		name                string
+		req                 oas.OptGetBlockchainRawAccountsReq
+		wantStatuses        map[string]oas.AccountStatus
+		wantOrder           []string
+		wantBadRequestError string
+	}{
+		{
+			name: "mix of existing and nonexistent",
+			req: oas.OptGetBlockchainRawAccountsReq{
+				Set: true,
+				Value: oas.GetBlockchainRawAccountsReq{
+					AccountIds: []string{
+						"-1:3333333333333333333333333333333333333333333333333333333333333333",
+						"0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf17",
+						"-1:5555555555555555555555555555555555555555555555555555555555555555",
+					},
+				},
+			},
+			wantStatuses: map[string]oas.AccountStatus{
+				"-1:3333333333333333333333333333333333333333333333333333333333333333": oas.AccountStatusActive,
+				"0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf17":  oas.AccountStatusNonexist,
+				"-1:5555555555555555555555555555555555555555555555555555555555555555": oas.AccountStatusActive,
+			},
+			wantOrder: []string{
+				"-1:3333333333333333333333333333333333333333333333333333333333333333",
+				"0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf17",
+				"-1:5555555555555555555555555555555555555555555555555555555555555555",
+			},
+		},
+		{
+			name: "exceeds bulk limit",
+			req: oas.OptGetBlockchainRawAccountsReq{
+				Set: true,
+				Value: oas.GetBlockchainRawAccountsReq{
+					AccountIds: []string{
+						"-1:3333333333333333333333333333333333333333333333333333333333333333",
+						"-1:5555555555555555555555555555555555555555555555555555555555555555",
+						"0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf18",
+						"0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf17",
+						"0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf16",
+					},
+				},
+			},
+			wantBadRequestError: "the maximum number of accounts to request at once: 4",
+		},
+		{
+			name: "empty list",
+			req: oas.OptGetBlockchainRawAccountsReq{
+				Set:   true,
+				Value: oas.GetBlockchainRawAccountsReq{AccountIds: []string{}},
+			},
+			wantBadRequestError: "empty list of ids",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, _ := zap.NewDevelopment()
+			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
+			require.Nil(t, err)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
+			require.Nil(t, err)
+			h := &Handler{
+				storage: liteStorage,
+				limits: Limits{
+					BulkLimits: 4,
+				},
+			}
+			res, err := h.GetBlockchainRawAccounts(context.Background(), tt.req)
+			if len(tt.wantBadRequestError) > 0 {
+				badRequest, ok := err.(*oas.ErrorStatusCode)
+				require.True(t, ok)
+				require.Equal(t, tt.wantBadRequestError, badRequest.Response.Error)
+				return
+			}
+			require.Nil(t, err)
+
+			gotOrder := make([]string, 0, len(res.Accounts))
+			gotStatuses := map[string]oas.AccountStatus{}
+			for _, account := range res.Accounts {
+				gotOrder = append(gotOrder, account.Address)
+				gotStatuses[account.Address] = account.Status
+			}
+			require.Equal(t, tt.wantOrder, gotOrder)
+			require.Equal(t, tt.wantStatuses, gotStatuses)
+		})
+	}
+}
+
 func TestHandler_GetAccount(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name        string
 		params      oas.GetAccountParams
@@ -92,9 +202,14 @@ func TestHandler_GetAccount(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
-			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					return addressbook.KnownAddress{}, false
+				},
+			}
+			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book), WithSpamFilter(spam.NewSpamFilter()))
 			require.Nil(t, err)
 			accountRes, err := h.GetAccount(context.Background(), tt.params)
 			require.Nil(t, err)
@@ -105,6 +220,10 @@ func TestHandler_GetAccount(t *testing.T) {
 }
 
 func TestHandler_GetAccounts(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name                string
 		req                 oas.OptGetAccountsReq
@@ -156,12 +275,36 @@ func TestHandler_GetAccounts(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					switch a.ToRaw() {
+					case "-1:3333333333333333333333333333333333333333333333333333333333333333":
+						return addressbook.KnownAddress{
+							Name:    "Elector Contract",
+							Address: "-1:3333333333333333333333333333333333333333333333333333333333333333",
+						}, true
+					case "-1:5555555555555555555555555555555555555555555555555555555555555555":
+						return addressbook.KnownAddress{
+							Name:    "Config Contract",
+							Address: "-1:5555555555555555555555555555555555555555555555555555555555555555",
+						}, true
+					case "0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf18":
+						return addressbook.KnownAddress{
+							Name:    "Getgems Marketplace",
+							Address: "0:a3935861f79daf59a13d6d182e1640210c02f98e3df18fda74b8f5ab141abf18",
+						}, true
+					default:
+						return addressbook.KnownAddress{}, false
+					}
+				},
+			}
 			h := &Handler{
-				addressBook: addressbook.NewAddressBook(logger, config.AddressPath, config.JettonPath, config.CollectionPath, liteStorage),
+				addressBook: book,
 				storage:     liteStorage,
 				state:       chainstate.NewChainState(liteStorage),
+				spamFilter:  spam.NewSpamFilter(),
 				limits: Limits{
 					BulkLimits: 4,
 				},
@@ -188,6 +331,10 @@ func TestHandler_GetAccounts(t *testing.T) {
 }
 
 func TestHandler_GetTransactions(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name           string
 		params         oas.GetBlockchainBlockTransactionsParams
@@ -214,7 +361,7 @@ func TestHandler_GetTransactions(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
 			book := &mockAddressBook{
 				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {

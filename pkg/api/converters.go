@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +32,16 @@ type ErrorWithExtendedCode struct {
 	Code         int
 	Message      string
 	ExtendedCode references.ExtendedCode
+	// Details, when set, exposes the required/available TON amounts (in nanotons)
+	// as structured fields so clients don't have to parse them out of Message.
+	// Clients switch on ExtendedCode to decide how to interpret it.
+	Details *InsufficientFunds
+}
+
+// InsufficientFunds carries the gas shortfall of a failed request.
+type InsufficientFunds struct {
+	Required  int64
+	Available int64
 }
 
 func (e ErrorWithExtendedCode) Error() string {
@@ -52,20 +64,50 @@ func extendedCode(code references.ExtendedCode) oas.OptInt64 {
 }
 
 func toError(defaultCode int, err error) *oas.ErrorStatusCode {
+	var res *oas.ErrorStatusCode
+	if errors.As(err, &res) {
+		return res
+	}
 	var e ErrorWithExtendedCode
 	if errors.As(err, &e) {
+		response := oas.Error{
+			Error:     censor(e.Message),
+			ErrorCode: extendedCode(e.ExtendedCode),
+		}
+		if e.Details != nil {
+			response.Details = oas.NewOptInsufficientFunds(oas.InsufficientFunds{
+				Required:  e.Details.Required,
+				Available: e.Details.Available,
+			})
+		}
 		return &oas.ErrorStatusCode{
 			StatusCode: e.Code,
-			Response: oas.Error{
-				Error:     censor(e.Message),
-				ErrorCode: extendedCode(e.ExtendedCode),
-			},
+			Response:   response,
 		}
 	}
 	if s, ok := status.FromError(err); ok {
 		return &oas.ErrorStatusCode{StatusCode: defaultCode, Response: oas.Error{Error: censor(s.Message())}}
 	}
 	return &oas.ErrorStatusCode{StatusCode: defaultCode, Response: oas.Error{Error: censor(err.Error())}}
+}
+
+func parseAccountID(raw string) (tongo.AccountID, error) {
+	addr, err := tongo.ParseAddress(raw)
+	if err != nil {
+		return tongo.AccountID{}, err
+	}
+	return addr.ID, nil
+}
+
+func parseOptionalAccountID(raw string) (*tongo.AccountID, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	id, err := parseAccountID(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
 }
 
 func anyToJSONRawMap(a any) map[string]jx.Raw { //todo: переписать этот ужас
@@ -106,8 +148,21 @@ func anyToJSONRawMap(a any) map[string]jx.Raw { //todo: переписать э�
 	return m
 }
 
+var NoneAccount = oas.AccountAddress{
+	Address: "",
+	Name:    oas.NewOptString("NoneAddr"),
+}
+
 func convertAccountAddress(id tongo.AccountID, book addressBook) oas.AccountAddress {
-	address := oas.AccountAddress{Address: id.ToRaw()}
+	address := convertAccountAddressPure(id, book, false)
+	if wallet, err := book.IsWallet(id); err == nil {
+		address.IsWallet = wallet
+	}
+	return address
+}
+
+func convertAccountAddressPure(id tongo.AccountID, book addressBook, isWallet bool) oas.AccountAddress {
+	address := oas.AccountAddress{Address: id.ToRaw(), IsWallet: isWallet}
 	if i, prs := book.GetAddressInfoByAddress(id); prs {
 		if i.Name != "" {
 			address.SetName(oas.NewOptString(i.Name))
@@ -116,9 +171,6 @@ func convertAccountAddress(id tongo.AccountID, book addressBook) oas.AccountAddr
 			address.SetIcon(oas.NewOptString(imgGenerator.DefaultGenerator.GenerateImageUrl(i.Image, 200, 200)))
 		}
 		address.IsScam = i.IsScam
-	}
-	if wallet, err := book.IsWallet(id); err == nil {
-		address.IsWallet = wallet
 	}
 	return address
 }
@@ -189,11 +241,7 @@ func convertTuple(v tlb.VmStkTuple) (oas.TvmStackRecord, error) {
 	if v.Len == 0 {
 		return r, nil
 	}
-	if v.Len == 2 && (v.Data.Tail.SumType == "VmStkTuple" || v.Data.Tail.SumType == "VmStkNull") {
-		records, err = v.RecursiveToSlice()
-	} else {
-		records, err = v.Data.RecursiveToSlice(int(v.Len))
-	}
+	records, err = v.Data.RecursiveToSlice(int(v.Len))
 	if err != nil {
 		return r, err
 	}
@@ -205,6 +253,63 @@ func convertTuple(v tlb.VmStkTuple) (oas.TvmStackRecord, error) {
 		r.Tuple = append(r.Tuple, ov)
 	}
 	return r, nil
+}
+
+func parseExecGetMethodArgs(arg oas.ExecGetMethodArg) (tlb.VmStackValue, error) {
+	switch arg.Type {
+	case oas.ExecGetMethodArgTypeNan:
+		if arg.Value != "NaN" {
+			return tlb.VmStackValue{}, fmt.Errorf("expected 'NaN' for type 'nan', got '%v'", arg.Value)
+		}
+		return tlb.VmStackValue{SumType: "VmStkNan"}, nil
+
+	case oas.ExecGetMethodArgTypeNull:
+		if arg.Value != "Null" {
+			return tlb.VmStackValue{}, fmt.Errorf("expected 'Null' for type 'null', got '%v'", arg.Value)
+		}
+		return tlb.VmStackValue{SumType: "VmStkNull"}, nil
+
+	case oas.ExecGetMethodArgTypeTinyint:
+		i, err := strconv.ParseInt(arg.Value, 10, 64)
+		if err != nil {
+			return tlb.VmStackValue{}, fmt.Errorf("invalid tinyint value: %v", err)
+		}
+		return tlb.VmStackValue{SumType: "VmStkTinyInt", VmStkTinyInt: i}, nil
+
+	case oas.ExecGetMethodArgTypeInt257:
+		if !strings.HasPrefix(arg.Value, "0x") {
+			return tlb.VmStackValue{}, fmt.Errorf("int257 value must start with '0x'")
+		}
+		i := big.Int{}
+		if _, ok := i.SetString(arg.Value[2:], 16); !ok {
+			return tlb.VmStackValue{}, fmt.Errorf("invalid int257 boc: %v", arg.Value)
+		}
+		return tlb.VmStackValue{SumType: "VmStkInt", VmStkInt: tlb.Int257(i)}, nil
+
+	case oas.ExecGetMethodArgTypeSlice:
+		account, err := tongo.ParseAddress(arg.Value)
+		if err != nil {
+			return tlb.VmStackValue{}, fmt.Errorf("invalid address: %v", err)
+		}
+		return tlb.TlbStructToVmCellSlice(account.ID.ToMsgAddress())
+
+	case oas.ExecGetMethodArgTypeCellBocBase64:
+		c, err := boc.DeserializeSinglRootBase64(arg.Value)
+		if err != nil {
+			return tlb.VmStackValue{}, fmt.Errorf("invalid cell BOC base64: %v", err)
+		}
+		return tlb.VmStackValue{SumType: "VmStkCell", VmStkCell: tlb.Ref[boc.Cell]{Value: *c}}, nil
+
+	case oas.ExecGetMethodArgTypeSliceBocHex:
+		cells, err := boc.DeserializeBocHex(arg.Value)
+		if err != nil || len(cells) != 1 {
+			return tlb.VmStackValue{}, fmt.Errorf("invalid slice BOC boc: %v", err)
+		}
+		return tlb.CellToVmCellSlice(cells[0])
+
+	default:
+		return tlb.VmStackValue{}, fmt.Errorf("unsupported argument type: %v", arg.Type)
+	}
 }
 
 func stringToTVMStackRecord(s string) (tlb.VmStackValue, error) {
@@ -225,13 +330,13 @@ func stringToTVMStackRecord(s string) (tlb.VmStackValue, error) {
 		i := big.Int{}
 		_, ok := i.SetString(s[2:], 16)
 		if !ok {
-			return tlb.VmStackValue{}, fmt.Errorf("invalid hex %v", s)
+			return tlb.VmStackValue{}, fmt.Errorf("invalid boc %v", s)
 		}
 		return tlb.VmStackValue{SumType: "VmStkInt", VmStkInt: tlb.Int257(i)}, nil
 	}
 	isDigit := true
 	for _, c := range s {
-		if !unicode.IsDigit(c) {
+		if !(unicode.IsDigit(c) || c == '-') {
 			isDigit = false
 			break
 		}
@@ -257,7 +362,7 @@ func stringToTVMStackRecord(s string) (tlb.VmStackValue, error) {
 func (h *Handler) convertMultisig(ctx context.Context, item core.Multisig) (*oas.Multisig, error) {
 	converted := oas.Multisig{
 		Address:   item.AccountID.ToRaw(),
-		Seqno:     item.Seqno,
+		Seqno:     item.Seqno.String(),
 		Threshold: item.Threshold,
 	}
 	for _, account := range item.Signers {
@@ -267,39 +372,93 @@ func (h *Handler) convertMultisig(ctx context.Context, item core.Multisig) (*oas
 		converted.Proposers = append(converted.Proposers, account.ToRaw())
 	}
 	for _, order := range item.Orders {
-		var signers []string
-		for _, account := range order.Signers {
-			signers = append(signers, account.ToRaw())
-		}
-		risk := walletPkg.Risk{
-			TransferAllRemainingBalance: false,
-			Jettons:                     map[tongo.AccountID]big.Int{},
-		}
-		for _, action := range order.Actions {
-			switch action.SumType {
-			case "SendMessage":
-				var err error
-				risk, err = walletPkg.ExtractRiskFromMessage(action.SendMessage.Field0.Message, risk, action.SendMessage.Field0.Mode)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-		oasRisk, err := h.convertRisk(ctx, risk, item.AccountID)
+		o, err := h.convertMultisigOrder(ctx, order)
 		if err != nil {
 			return nil, err
 		}
-		converted.Orders = append(converted.Orders, oas.MultisigOrder{
-			Address:          order.AccountID.ToRaw(),
-			OrderSeqno:       order.OrderSeqno,
-			Threshold:        order.Threshold,
-			SentForExecution: order.SentForExecution,
-			Signers:          signers,
-			ApprovalsNum:     order.ApprovalsNum,
-			ExpirationDate:   order.ExpirationDate,
-			CreationDate:     order.CreationDate,
-			Risk:             oasRisk,
-		})
+		converted.Orders = append(converted.Orders, o)
 	}
 	return &converted, nil
+}
+
+func (h *Handler) convertMultisigOrder(ctx context.Context, order core.MultisigOrder) (oas.MultisigOrder, error) {
+	var signers []string
+	for _, account := range order.Signers {
+		signers = append(signers, account.ToRaw())
+	}
+	risk := walletPkg.Risk{
+		TransferAllRemainingBalance: false,
+		Jettons:                     map[tongo.AccountID]big.Int{},
+	}
+	var cp oas.OptMultisigOrderChangingParameters
+	for _, action := range order.Actions {
+		switch action.SumType {
+		case "SendMessage":
+			var err error
+			risk, err = walletPkg.ExtractRiskFromMessage(action.SendMessage.Field0.Message, risk, action.SendMessage.Field0.Mode)
+			if err != nil {
+				return oas.MultisigOrder{}, err
+			}
+		case "UpdateMultisigParam":
+			newParams := oas.MultisigOrderChangingParameters{
+				Threshold: int32(action.UpdateMultisigParam.Threshold),
+			}
+			for _, s := range action.UpdateMultisigParam.Signers.Values() {
+				a, err := tongo.AccountIDFromTlb(s)
+				if err != nil || a == nil {
+					return oas.MultisigOrder{}, fmt.Errorf("can't convert %v to account id", s)
+				}
+				newParams.Signers = append(newParams.Signers, a.ToRaw())
+			}
+			for _, p := range action.UpdateMultisigParam.Proposers.Values() {
+				a, err := tongo.AccountIDFromTlb(p)
+				if err != nil || a == nil {
+					return oas.MultisigOrder{}, fmt.Errorf("can't convert %v to account id", p)
+				}
+				newParams.Proposers = append(newParams.Proposers, a.ToRaw())
+			}
+			cp.SetTo(newParams)
+		}
+	}
+	oasRisk, err := h.convertRisk(ctx, risk, order.MultisigAccountID, nil)
+	if err != nil {
+		return oas.MultisigOrder{}, err
+	}
+
+	return oas.MultisigOrder{
+		MultisigAddress:    order.MultisigAccountID.ToRaw(),
+		Address:            order.AccountID.ToRaw(),
+		OrderSeqno:         order.OrderSeqno.String(),
+		Threshold:          order.Threshold,
+		SentForExecution:   order.SentForExecution,
+		Signers:            signers,
+		ApprovalsNum:       order.ApprovalsNum,
+		ExpirationDate:     order.ExpirationDate,
+		CreationDate:       order.CreationDate,
+		Risk:               oasRisk,
+		ChangingParameters: cp,
+	}, nil
+}
+
+func convertStateInit(si tlb.StateInit) (oas.OptString, error) {
+	cell := boc.NewCell()
+	if err := tlb.Marshal(cell, si); err != nil {
+		return oas.OptString{}, fmt.Errorf("marshalling stat init: %v", err)
+	}
+	b64, err := cell.ToBocBase64()
+	if err != nil {
+		return oas.OptString{}, fmt.Errorf("base64 encoding failed: %v", err)
+	}
+	return oas.NewOptString(b64), nil
+}
+
+func requirePublicKey(pk oas.OptString) (ed25519.PublicKey, error) {
+	if !pk.IsSet() || pk.Value == "" {
+		return nil, errors.New("public_key is empty")
+	}
+	if decoded, err := hex.DecodeString(pk.Value); err != nil {
+		return nil, fmt.Errorf("public_key is not valid hex: %v", err)
+	} else {
+		return decoded, nil
+	}
 }

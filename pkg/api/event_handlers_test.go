@@ -5,7 +5,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
 	"testing"
+
+	"github.com/tonkeeper/opentonapi/pkg/addressbook"
+	"github.com/tonkeeper/opentonapi/pkg/bath"
+	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/opentonapi/pkg/spam"
+	"github.com/tonkeeper/tongo"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tonkeeper/tongo/liteapi"
@@ -18,11 +25,15 @@ import (
 )
 
 func TestHandler_EmulateMessageToAccountEvent(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name          string
 		request       oas.EmulateMessageToAccountEventReq
 		params        oas.EmulateMessageToAccountEventParams
-		wantActions   []oas.ActionType
+		wantActions   []string
 		wantErrorCode int
 	}{
 		{
@@ -33,8 +44,8 @@ func TestHandler_EmulateMessageToAccountEvent(t *testing.T) {
 			params: oas.EmulateMessageToAccountEventParams{
 				AccountID: "0:cb6ef152f217922bd71aa6ec4a1ee3d92face9a536a8e7b560834f01e62c1989",
 			},
-			wantActions: []oas.ActionType{
-				oas.ActionTypeContractDeploy,
+			wantActions: []string{
+				string(bath.ContractDeploy),
 			},
 		},
 		{
@@ -45,8 +56,8 @@ func TestHandler_EmulateMessageToAccountEvent(t *testing.T) {
 			params: oas.EmulateMessageToAccountEventParams{
 				AccountID: "EQC1DeuBq7z72sp8qPMV_wYnCo-xwtWPv1F6OHmQwikUj-cH",
 			},
-			wantActions: []oas.ActionType{
-				oas.ActionTypeTonTransfer,
+			wantActions: []string{
+				string(bath.TonTransfer),
 			},
 		},
 		{
@@ -57,8 +68,8 @@ func TestHandler_EmulateMessageToAccountEvent(t *testing.T) {
 			params: oas.EmulateMessageToAccountEventParams{
 				AccountID: "0:10fb8f61c456b7553020ca16c60c3d2907ea2ac4360b2b23df49ac6f49e9edb5",
 			},
-			wantActions: []oas.ActionType{
-				oas.ActionTypeJettonSwap,
+			wantActions: []string{
+				string(bath.JettonSwap),
 			},
 		},
 		{
@@ -77,9 +88,14 @@ func TestHandler_EmulateMessageToAccountEvent(t *testing.T) {
 			logger, _ := zap.NewDevelopment()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
-			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					return addressbook.KnownAddress{}, false
+				},
+			}
+			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book), WithSpamFilter(spam.NewSpamFilter()))
 			require.Nil(t, err)
 
 			got, err := h.EmulateMessageToAccountEvent(context.Background(), &tt.request, tt.params)
@@ -99,6 +115,10 @@ func TestHandler_EmulateMessageToAccountEvent(t *testing.T) {
 }
 
 func Test_prepareAccountState(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 	require.Nil(t, err)
 

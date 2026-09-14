@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+
 	"github.com/tonkeeper/opentonapi/internal/g"
 	"github.com/tonkeeper/opentonapi/pkg/bath"
 	imgGenerator "github.com/tonkeeper/opentonapi/pkg/image"
@@ -25,26 +27,21 @@ func (h *Handler) convertNFT(ctx context.Context, item core.NftItem, book addres
 		Metadata: anyToJSONRawMap(item.Metadata),
 		DNS:      g.Opt(item.DNS),
 	}
+	if item.CodeHash != "" {
+		nftItem.CodeHash = oas.NewOptString(item.CodeHash)
+	}
+	if item.DataHash != "" {
+		nftItem.DataHash = oas.NewOptString(item.DataHash)
+	}
 	if item.Sale != nil {
-		tokenName := "TON"
-		if item.Sale.Price.Token != nil {
-			meta, _ := metaCache.getJettonMeta(ctx, *item.Sale.Price.Token)
-			tokenName = meta.Name
-			if tokenName == "" {
-				tokenName = UnknownJettonName
-			}
-		}
 		nftItem.SetSale(oas.NewOptSale(oas.Sale{
 			Address: item.Sale.Contract.ToRaw(),
 			Market:  convertAccountAddress(item.Sale.Marketplace, book),
 			Owner:   convertOptAccountAddress(item.Sale.Seller, book),
-			Price: oas.Price{
-				Value:     fmt.Sprintf("%v", item.Sale.Price.Amount),
-				TokenName: tokenName,
-			},
+			Price:   h.convertPrice(ctx, item.Sale.Price),
 		}))
 	}
-	var image, description string
+	var image, description, name string
 	if item.Metadata != nil {
 		if imageI, prs := item.Metadata["image"]; prs {
 			image, _ = imageI.(string)
@@ -52,20 +49,33 @@ func (h *Handler) convertNFT(ctx context.Context, item core.NftItem, book addres
 		if descriptionI, prs := item.Metadata["description"]; prs {
 			description, _ = descriptionI.(string)
 		}
+		if nameI, prs := item.Metadata["name"]; prs {
+			name, _ = nameI.(string)
+		}
 	}
+	collectionTrust := core.TrustNone
 	if item.CollectionAddress != nil {
-		cInfo, _ := metaCache.getCollectionMeta(ctx, *item.CollectionAddress)
-		if cc, prs := book.GetCollectionInfoByAddress(*item.CollectionAddress); prs {
-			nftItem.ApprovedBy = append(nftItem.ApprovedBy, cc.Approvers...)
+		collectionAddr := *item.CollectionAddress
+		cInfo, _ := metaCache.getCollectionMeta(ctx, collectionAddr)
+		collectionTrust = h.spamFilter.NftCollectionTrust(collectionAddr, cInfo.Owner, cInfo.Name, cInfo.Description, cInfo.Image)
+		if cc, prs := book.GetCollectionInfoByAddress(collectionAddr); prs {
+			for _, approver := range cc.Approvers {
+				nftItem.ApprovedBy = append(nftItem.ApprovedBy, oas.NftApprovedByItem(approver))
+			}
 		}
 		nftItem.Collection.SetTo(oas.NftItemCollection{
 			Address:     item.CollectionAddress.ToRaw(),
 			Name:        cInfo.Name,
 			Description: cInfo.Description,
 		})
-		if *item.CollectionAddress == references.RootDotTon && item.DNS != nil && item.Verified {
+		if collectionAddr == references.RootDotTon && item.DNS != nil && item.Verified {
 			image = "https://cache.tonapi.io/dns/preview/" + *item.DNS + ".png"
 			nftItem.Metadata["name"] = []byte(fmt.Sprintf(`"%v"`, *item.DNS))
+			delete(nftItem.Metadata, "description")
+			delete(nftItem.Metadata, "image")
+			delete(nftItem.Metadata, "lottie")
+		}
+		if collectionAddr == references.RootDotTon || collectionAddr == references.RootTelegram {
 			buttons, _ := json.Marshal([]map[string]string{{
 				"label": "Manage",
 				"uri":   fmt.Sprintf("https://dns.tonkeeper.com/manage?v=%v", item.Address.ToRaw())},
@@ -73,12 +83,23 @@ func (h *Handler) convertNFT(ctx context.Context, item core.NftItem, book addres
 			nftItem.Metadata["buttons"] = buttons
 		}
 	}
-	if len(nftItem.ApprovedBy) > 0 && nftItem.Verified {
+	switch {
+	case len(nftItem.ApprovedBy) > 0 && nftItem.Verified:
 		nftItem.Trust = oas.TrustType(core.TrustWhitelist)
-	} else {
-		nftTrust := h.spamFilter.NftTrust(item.Address, item.CollectionAddress, description, image)
+	case trustType == core.TrustWhitelist || trustType == core.TrustGraylist:
+		// The item has been reviewed and cleared (support graylisted it, for instance). That
+		// verdict wins over whatever the spam filter's heuristics would otherwise return.
+		nftItem.Trust = oas.TrustType(trustType)
+	default:
+		nftTrust := h.spamFilter.NftTrust(item.Address, item.CollectionAddress, item.OwnerAddress, collectionTrust, name, description, image)
 		if nftTrust == core.TrustNone && trustType != "" {
 			nftTrust = trustType
+		}
+		if nftTrust == core.TrustNone && !h.nftTrustNoneEnabled {
+			// Deployments that can't update their client instantly (e.g. mobile) keep the old
+			// contract: an item nothing vouches for is blacklisted so they keep blurring it.
+			// Flip NFT_TRUST_NONE_ENABLED once the client handles TrustNone correctly.
+			nftTrust = core.TrustBlacklist
 		}
 		nftItem.Trust = oas.TrustType(nftTrust)
 	}
@@ -96,30 +117,49 @@ func (h *Handler) convertNFT(ctx context.Context, item core.NftItem, book addres
 	return nftItem
 }
 
-func convertNftCollection(collection core.NftCollection, book addressBook) oas.NftCollection {
+func (h *Handler) convertNftCollection(collection core.NftCollection, book addressBook) oas.NftCollection {
 	nftCollection := oas.NftCollection{
 		Address:              collection.Address.ToRaw(),
 		NextItemIndex:        int64(collection.NextItemIndex),
 		RawCollectionContent: fmt.Sprintf("%x", collection.CollectionContent[:]),
 		Owner:                convertOptAccountAddress(collection.OwnerAddress, book),
 	}
-	if len(collection.Metadata) == 0 {
-		return nftCollection
-	}
-	metadata := make(map[string]jx.Raw)
-	image := references.Placeholder
-	for k, v := range collection.Metadata {
-		if k == "image" {
-			if img, ok := v.(string); ok && img != "" {
-				image = img
-			}
+	var image, description, name string
+	if len(collection.Metadata) != 0 {
+		if v, ok := collection.Metadata["image"]; ok {
+			image, _ = v.(string)
 		}
-		if raw, err := json.Marshal(v); err == nil {
-			metadata[k] = raw
+		if v, ok := collection.Metadata["description"]; ok {
+			description, _ = v.(string)
+		}
+		if v, ok := collection.Metadata["name"]; ok {
+			name, _ = v.(string)
 		}
 	}
 	if known, ok := book.GetCollectionInfoByAddress(collection.Address); ok {
 		nftCollection.ApprovedBy = append(nftCollection.ApprovedBy, known.Approvers...)
+	}
+	if len(nftCollection.ApprovedBy) != 0 {
+		nftCollection.Trust = oas.TrustType(core.TrustWhitelist)
+	} else {
+		nftCollection.Trust = oas.TrustType(h.spamFilter.NftCollectionTrust(collection.Address, collection.OwnerAddress, name, description, image))
+	}
+
+	if collection.ContentURL != "" && (strings.HasPrefix(collection.ContentURL, "http://") || strings.HasPrefix(collection.ContentURL, "https://")) {
+		nftCollection.MetadataStatus.SetTo(formatMetadataStatus(collection))
+	}
+
+	if len(collection.Metadata) == 0 {
+		return nftCollection
+	}
+	metadata := make(map[string]jx.Raw)
+	if image == "" {
+		image = references.Placeholder
+	}
+	for k, v := range collection.Metadata {
+		if raw, err := json.Marshal(v); err == nil {
+			metadata[k] = raw
+		}
 	}
 	nftCollection.Metadata.SetTo(metadata)
 	for _, size := range []int{5, 100, 500, 1500} {
@@ -132,7 +172,23 @@ func convertNftCollection(collection core.NftCollection, book addressBook) oas.N
 	return nftCollection
 }
 
-func (h *Handler) convertNftHistory(ctx context.Context, account tongo.AccountID, traceIDs []tongo.Bits256, isBannedTraces map[string]bool, acceptLanguage oas.OptString) ([]oas.AccountEvent, int64, error) {
+func formatMetadataStatus(collection core.NftCollection) oas.NftCollectionMetadataStatus {
+	status := oas.NftCollectionMetadataStatus{
+		URL:                oas.NewOptString(collection.ContentURL),
+		IsBroken:           oas.NewOptBool(collection.LastOffchainMetaRefreshSuccess.IsZero()),
+		LastRefreshTry:     oas.OptNilInt64{Null: true},
+		LastRefreshSuccess: oas.OptNilInt64{Null: true},
+	}
+	if !collection.LastOffchainMetaRefreshTry.IsZero() {
+		status.LastRefreshTry.SetTo(collection.LastOffchainMetaRefreshTry.Unix())
+	}
+	if !collection.LastOffchainMetaRefreshSuccess.IsZero() {
+		status.LastRefreshSuccess.SetTo(collection.LastOffchainMetaRefreshSuccess.Unix())
+	}
+	return status
+}
+
+func (h *Handler) convertNftHistory(ctx context.Context, account tongo.AccountID, traceIDs []tongo.Bits256, acceptLanguage oas.OptString) ([]oas.AccountEvent, int64, error) {
 	var lastLT uint64
 	events := make([]oas.AccountEvent, 0, len(traceIDs))
 	for _, traceID := range traceIDs {
@@ -144,7 +200,7 @@ func (h *Handler) convertNftHistory(ctx context.Context, account tongo.AccountID
 			}
 			return nil, 0, err
 		}
-		actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage), bath.WithStraws(bath.NFTStraws))
+		actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage), bath.WithStraws(bath.NFTStraws), bath.WithAddressBook(h.addressBook))
 		if err != nil {
 			return nil, 0, err
 		}
@@ -160,13 +216,13 @@ func (h *Handler) convertNftHistory(ctx context.Context, account tongo.AccountID
 			if action.Type != bath.NftItemTransfer {
 				continue
 			}
-			convertedAction, err := h.convertAction(ctx, &account, action, acceptLanguage)
+			convertedAction, err := h.convertAction(ctx, &account, action, acceptLanguage, event.Lt)
 			if err != nil {
 				return nil, 0, err
 			}
 			event.Actions = append(event.Actions, convertedAction)
 		}
-		event.IsScam = h.spamFilter.IsScamEvent(event.Actions, &account, trace.Account, isBannedTraces[event.EventID])
+		event.IsScam = h.spamFilter.IsScamEvent(event.Actions, &account, trace.Account)
 		if len(event.Actions) > 0 {
 			events = append(events, event)
 			lastLT = trace.Lt
@@ -174,4 +230,22 @@ func (h *Handler) convertNftHistory(ctx context.Context, account tongo.AccountID
 	}
 
 	return events, int64(lastLT), nil
+}
+
+// convertNftOperation converts a single NFT operation. nft is the operation's NFT as loaded from
+// storage and trust its trust from the spam filter's storage; both are supplied by the caller so a
+// page of operations can be resolved with one bulk lookup.
+func (h *Handler) convertNftOperation(ctx context.Context, op core.NftOperation, nft core.NftItem, trustType core.TrustType) oas.NftOperation {
+	item := h.convertNFT(ctx, nft, h.addressBook, h.metaCache, trustType)
+
+	operation := oas.NftOperation{
+		Operation:       op.Operation,
+		Utime:           op.Utime,
+		Lt:              int64(op.Lt),
+		TransactionHash: op.TxID.Hex(),
+		Source:          convertOptAccountAddress(op.Source, h.addressBook),
+		Destination:     convertOptAccountAddress(op.Destination, h.addressBook),
+		Item:            item,
+	}
+	return operation
 }

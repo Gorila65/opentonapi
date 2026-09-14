@@ -21,12 +21,14 @@ type Config struct {
 		MetricsPort        int                 `env:"METRICS_PORT" envDefault:"9010"`
 		Accounts           accountsList        `env:"ACCOUNTS"`
 		LiteServers        []config.LiteServer `env:"LITE_SERVERS"`
+		ArchiveLiteServers []config.LiteServer `env:"ARCHIVE_LITE_SERVERS"`
 		SendingLiteservers []config.LiteServer `env:"SENDING_LITE_SERVERS"`
 		IsTestnet          bool                `env:"IS_TESTNET" envDefault:"false"`
 	}
 	TonConnect struct {
 		Secret string `env:"TON_CONNECT_SECRET"`
 	}
+	PublicAPIURL string `env:"PUBLIC_API_URL" envDefault:"https://tonapi.io"`
 }
 
 type accountsList []tongo.AccountID

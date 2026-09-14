@@ -130,7 +130,7 @@ func convertReducedBlock(block core.ReducedBlock) oas.ReducedBlock {
 	return converted
 }
 
-func convertTransaction(t core.Transaction, accountInterfaces []abi.ContractInterface, book addressBook) oas.Transaction {
+func (h *Handler) convertTransaction(t core.Transaction, accountInterfaces []abi.ContractInterface, book addressBook) oas.Transaction {
 	tx := oas.Transaction{
 		Hash:            t.Hash.Hex(),
 		Lt:              int64(t.Lt),
@@ -148,6 +148,10 @@ func convertTransaction(t core.Transaction, accountInterfaces []abi.ContractInte
 		Aborted:         t.Aborted,
 		Destroyed:       t.Destroyed,
 		Raw:             hex.EncodeToString(t.Raw),
+	}
+	// A transaction originated from a blacklisted (scam) account is itself scam.
+	if t.InMsg != nil && t.InMsg.Source != nil && h.spamFilter.AccountTrust(*t.InMsg.Source) == core.TrustBlacklist {
+		tx.Account.IsScam = true
 	}
 	if t.PrevTransLt != 0 {
 		tx.PrevTransLt.Value = int64(t.PrevTransLt)
@@ -508,6 +512,16 @@ func convertConfig(logger *zap.Logger, cfg tlb.ConfigParams) (*oas.BlockchainCon
 	if p29 := blockchainConfig.ConfigParam29; p29 != nil {
 		config.R29 = oas.NewOptBlockchainConfig29(convertConsensusConfig(logger, p29.ConsensusConfig))
 	}
+	if p30 := blockchainConfig.ConfigParam30; p30 != nil {
+		var param30 oas.BlockchainConfig30
+		if p30.NewConsensusConfigAll.Mc != nil {
+			param30.Mc = oas.NewOptNewConsensusConfig(convertNewConsensusConfig(logger, *p30.NewConsensusConfigAll.Mc))
+		}
+		if p30.NewConsensusConfigAll.Shard != nil {
+			param30.Shard = oas.NewOptNewConsensusConfig(convertNewConsensusConfig(logger, *p30.NewConsensusConfigAll.Shard))
+		}
+		config.R30 = oas.NewOptBlockchainConfig30(param30)
+	}
 	if p31 := blockchainConfig.ConfigParam31; p31 != nil {
 		param31 := oas.BlockchainConfig31{
 			FundamentalSmcAddr: make([]string, 0, len(p31.FundamentalSmcAddr.Keys())),
@@ -524,17 +538,16 @@ func convertConfig(logger *zap.Logger, cfg tlb.ConfigParams) (*oas.BlockchainCon
 		}
 		config.R43 = oas.NewOptBlockchainConfig43(param43)
 	}
-	if blockchainConfig.ConfigParam44 == nil {
-		return nil, fmt.Errorf("config doesn't have %v param", 44)
-	}
-	for _, addr := range blockchainConfig.ConfigParam44.SuspendedAddressList.Addresses.Keys() {
-		accountID := ton.AccountID{
-			Workchain: int32(addr.Workchain),
-			Address:   addr.Address,
+	if blockchainConfig.ConfigParam44 != nil {
+		for _, addr := range blockchainConfig.ConfigParam44.SuspendedAddressList.Addresses.Keys() {
+			accountID := ton.AccountID{
+				Workchain: int32(addr.Workchain),
+				Address:   addr.Address,
+			}
+			config.R44.Accounts = append(config.R44.Accounts, accountID.String())
 		}
-		config.R44.Accounts = append(config.R44.Accounts, accountID.String())
+		config.R44.SetSuspendedUntil(int(blockchainConfig.ConfigParam44.SuspendedAddressList.SuspendedUntil))
 	}
-	config.R44.SetSuspendedUntil(int(blockchainConfig.ConfigParam44.SuspendedAddressList.SuspendedUntil))
 	if p45 := blockchainConfig.ConfigParam45; p45 != nil {
 		var param45 oas.BlockchainConfig45
 		for _, item := range p45.PrecompiledContractsConfig.List.Items() {
@@ -642,9 +655,11 @@ func convertJettonBridgeParams(logger *zap.Logger, cfg tlb.JettonBridgeParams) o
 			Prices: oas.NewOptJettonBridgePrices(oas.JettonBridgePrices{
 				BridgeBurnFee:           int64(cfg.JettonBridgeParamsV1.Prices.BridgeBurnFee),
 				BridgeMintFee:           int64(cfg.JettonBridgeParamsV1.Prices.BridgeMintFee),
-				WalletMinTonsForStorage: int64(cfg.JettonBridgeParamsV1.Prices.WalletMinTonsForStorage),
+				WalletMinTonsForStorage: oas.OptInt64{Set: true, Value: int64(cfg.JettonBridgeParamsV1.Prices.WalletMinTonsForStorage)},
+				WalletMinGramForStorage: int64(cfg.JettonBridgeParamsV1.Prices.WalletMinTonsForStorage),
 				WalletGasConsumption:    int64(cfg.JettonBridgeParamsV1.Prices.WalletGasConsumption),
-				MinterMinTonsForStorage: int64(cfg.JettonBridgeParamsV1.Prices.MinterMinTonsForStorage),
+				MinterMinTonsForStorage: oas.OptInt64{Set: true, Value: int64(cfg.JettonBridgeParamsV1.Prices.MinterMinTonsForStorage)},
+				MinterMinGramForStorage: int64(cfg.JettonBridgeParamsV1.Prices.MinterMinTonsForStorage),
 				DiscoverGasConsumption:  int64(cfg.JettonBridgeParamsV1.Prices.DiscoverGasConsumption),
 			}),
 		}
@@ -757,6 +772,33 @@ func convertConsensusConfig(logger *zap.Logger, cfg tlb.ConsensusConfig) oas.Blo
 	}
 	logger.Error("unsupported ConsensusConfig format")
 	return oas.BlockchainConfig29{}
+}
+
+func convertNewConsensusConfig(logger *zap.Logger, cfg tlb.NewConsensusConfig) oas.NewConsensusConfig {
+	switch cfg.SumType {
+	case "SimplexConfig":
+		return oas.NewConsensusConfig{
+			Flags:                 int(cfg.SimplexConfig.Flags),
+			UseQuic:               cfg.SimplexConfig.UseQuic,
+			SlotsPerLeaderWindow:  int64(cfg.SimplexConfig.SlotsPerLeaderWindow),
+			TargetRateMs:          oas.NewOptInt64(int64(cfg.SimplexConfig.TargetRateMs)),
+			FirstBlockTimeoutMs:   oas.NewOptInt64(int64(cfg.SimplexConfig.FirstBlockTimeoutMs)),
+			MaxLeaderWindowDesync: oas.NewOptInt64(int64(cfg.SimplexConfig.MaxLeaderWindowDesync)),
+		}
+	case "SimplexConfigV2":
+		params := oas.NewConsensusConfigNoncriticalParams{}
+		for _, item := range cfg.SimplexConfigV2.NoncriticalParams.Items() {
+			params[fmt.Sprintf("%d", item.Key)] = int64(item.Value)
+		}
+		return oas.NewConsensusConfig{
+			Flags:                int(cfg.SimplexConfigV2.Flags),
+			UseQuic:              cfg.SimplexConfigV2.UseQuic,
+			SlotsPerLeaderWindow: int64(cfg.SimplexConfigV2.SlotsPerLeaderWindow),
+			NoncriticalParams:    oas.NewOptNewConsensusConfigNoncriticalParams(params),
+		}
+	}
+	logger.Error("unsupported NewConsensusConfig format")
+	return oas.NewConsensusConfig{}
 }
 
 func convertCatchainConfig(logger *zap.Logger, cfg tlb.CatchainConfig) oas.BlockchainConfig28 {
@@ -897,7 +939,7 @@ func convertActionPhaseResultCode(code int32) *string {
 		34:  "Unsupported action",
 		35:  "Invalid Source address",
 		36:  "Invalid Destination address",
-		37:  "Insufficient TON",
+		37:  "Insufficient Gram",
 		38:  "Insufficient extra-currencies",
 		40:  "Insufficient funds",
 		43:  "Maximum cells/tree depth exceeded",

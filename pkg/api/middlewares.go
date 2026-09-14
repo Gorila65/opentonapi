@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 
+	internalErrors "github.com/tonkeeper/opentonapi/pkg/pusher/errors"
+
 	"github.com/ogen-go/ogen/middleware"
 	"github.com/ogen-go/ogen/ogenerrors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -48,7 +50,9 @@ func asyncLoggingMiddleware(logger *zap.Logger) func(next AsyncHandler) AsyncHan
 			)
 			logger.Info("Handling request")
 			if err := next(w, r, connectionType, allowTokenInQuery); err != nil {
-				logger.Error("Fail", zap.Error(err))
+				if e, ok := err.(internalErrors.HTTPError); ok && e.Code > 499 {
+					logger.Error("Fail", zap.Error(err))
+				}
 				return err
 			}
 			logger.Info("Success")
@@ -63,17 +67,17 @@ var httpResponseTimeMetric = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Help:        "",
 	ConstLabels: nil,
 	Buckets:     []float64{0.001, 0.01, 0.05, 0.1, 0.5, 1, 10},
-}, []string{"operation"})
+}, []string{"host", "operation"})
 
 func ogenMetricsMiddleware(req middleware.Request, next middleware.Next) (middleware.Response, error) {
-	t := prometheus.NewTimer(httpResponseTimeMetric.WithLabelValues(req.OperationName))
+	t := prometheus.NewTimer(httpResponseTimeMetric.WithLabelValues(req.Raw.Host, req.OperationName))
 	defer t.ObserveDuration()
 	return next(req)
 }
 
 func asyncMetricsMiddleware(next AsyncHandler) AsyncHandler {
 	return func(w http.ResponseWriter, r *http.Request, connectionType int, allowTokenInQuery bool) error {
-		t := prometheus.NewTimer(httpResponseTimeMetric.WithLabelValues(asyncOperation(r)))
+		t := prometheus.NewTimer(httpResponseTimeMetric.WithLabelValues(r.Host, asyncOperation(r)))
 		defer t.ObserveDuration()
 		return next(w, r, connectionType, allowTokenInQuery)
 	}

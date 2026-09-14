@@ -2,13 +2,14 @@ package api
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"math/big"
 	"sync"
 	"time"
 
-	"golang.org/x/exp/slices"
+	"go.uber.org/zap"
+
+	"slices"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -35,9 +36,21 @@ var (
 	emulatedAccountCode = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "tonapi_emulated_account_code_counter",
 	}, []string{"code_hash"})
+	traceTTL = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "tonapi_trace_ttl",
+		Buckets: []float64{
+			0,            // trace expired
+			60,           // a minute
+			5 * 60,       // 5 minutes
+			15 * 60,      // 15 minutes
+			30 * 60,      // 30 minutes
+			60 * 60,      // an hour
+			24 * 60 * 60, // 24 hours
+		},
+	})
 )
 
-func (h *Handler) RunEmulation(ctx context.Context, msgCh <-chan blockchain.ExtInMsgCopy, emulationCh chan<- blockchain.ExtInMsgCopy) {
+func (h *Handler) RunEmulation(ctx context.Context, msgCh <-chan blockchain.ExtInMsgCopy) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -49,7 +62,7 @@ func (h *Handler) RunEmulation(ctx context.Context, msgCh <-chan blockchain.ExtI
 				defer cancel()
 
 				// TODO: find a way to emulate when tonapi receives a batch of messages in a single request to SendBlockchainMessage endpoint.
-				_, err := h.addToMempool(ctx, msgCopy.Payload, nil, emulationCh)
+				_, err := h.addToMempool(ctx, msgCopy.Payload, nil)
 				if err != nil {
 					sentry.Send("addToMempool", sentry.SentryInfoData{"payload": msgCopy.Payload}, sentry.LevelError)
 				}
@@ -80,7 +93,7 @@ func (h *Handler) isEmulationAllowed(accountID ton.AccountID, state tlb.ShardAcc
 	return true, nil
 }
 
-func (h *Handler) addToMempool(ctx context.Context, bytesBoc []byte, shardAccount map[tongo.AccountID]tlb.ShardAccount, emulationCh chan<- blockchain.ExtInMsgCopy) (map[tongo.AccountID]tlb.ShardAccount, error) {
+func (h *Handler) addToMempool(ctx context.Context, bytesBoc []byte, shardAccount map[tongo.AccountID]tlb.ShardAccount) (map[tongo.AccountID]tlb.ShardAccount, error) {
 	if shardAccount == nil {
 		shardAccount = map[tongo.AccountID]tlb.ShardAccount{}
 	}
@@ -102,6 +115,7 @@ func (h *Handler) addToMempool(ctx context.Context, bytesBoc []byte, shardAccoun
 	if err != nil {
 		return shardAccount, err
 	}
+	hash := message.Hash(true)
 	walletAddress, err := extractDestinationWallet(message)
 	if err != nil {
 		return nil, err
@@ -121,20 +135,21 @@ func (h *Handler) addToMempool(ctx context.Context, bytesBoc []byte, shardAccoun
 	if err != nil {
 		return shardAccount, err
 	}
-	emulator, err := txemulator.NewTraceBuilder(txemulator.WithAccountsSource(h.storage),
+	emulator, err := txemulator.NewTraceBuilder(
+		txemulator.WithAccountsSource(h.storage),
 		txemulator.WithAccountsMap(shardAccount),
 		txemulator.WithConfigBase64(config),
-		txemulator.WithSignatureCheck(),
+		txemulator.WithIgnoreSignatureDepth(1),
 	)
 	if err != nil {
 		return shardAccount, err
 	}
-	tree, err := emulator.Run(ctx, message)
-	if err != nil {
-		return shardAccount, err
+	tree, emulationErr := emulator.Run(ctx, message)
+	if emulationErr != nil {
+		return shardAccount, emulationErr
 	}
 	newShardAccount := emulator.FinalStates()
-	trace, err := emulatedTreeToTrace(ctx, h.executor, h.storage, tree, newShardAccount, nil, h.configPool)
+	trace, err := EmulatedTreeToTrace(ctx, h.executor, h.storage, tree, newShardAccount, nil, h.configPool, true)
 	if err != nil {
 		return shardAccount, err
 	}
@@ -142,11 +157,7 @@ func (h *Handler) addToMempool(ctx context.Context, bytesBoc []byte, shardAccoun
 	core.Visit(trace, func(node *core.Trace) {
 		accounts[node.Account] = struct{}{}
 	})
-	hash, err := msgCell[0].Hash256()
-	if err != nil {
-		return shardAccount, err
-	}
-	h.mempoolEmulate.traces.Set(hash, trace, cache.WithExpiration(time.Second*time.Duration(ttl)))
+	h.saveTraceWithState(ctx, trace, msgCell[0], ton.Bits256(hash).Hex())
 	var localMessageHashCache = make(map[ton.Bits256]bool)
 	for account := range accounts {
 		if _, ok := h.mempoolEmulateIgnoreAccounts[account]; ok { // the map is filled only once at the start
@@ -161,24 +172,46 @@ func (h *Handler) addToMempool(ctx context.Context, bytesBoc []byte, shardAccoun
 				includedToDB = err == nil
 				localMessageHashCache[mHash] = includedToDB
 			}
-			_, existsInCache := h.mempoolEmulate.traces.Get(mHash)
-			if !includedToDB && existsInCache { //because if err is not null it already happened and if !prs it is not in mempool
-				newMemHashes = append(newMemHashes, mHash)
-			}
 		}
-		newMemHashes = append(newMemHashes, hash) // it's important to make it last
+		newMemHashes = append(newMemHashes, ton.Bits256(hash)) // it's important to make it last
 		h.mempoolEmulate.accountsTraces.Set(account, newMemHashes, cache.WithExpiration(time.Second*time.Duration(ttl)))
-	}
-	emulationCh <- blockchain.ExtInMsgCopy{
-		MsgBoc:   base64.StdEncoding.EncodeToString(bytesBoc),
-		Details:  h.ctxToDetails(ctx),
-		Payload:  bytesBoc,
-		Accounts: accounts,
 	}
 	return newShardAccount, nil
 }
 
-func emulatedTreeToTrace(
+func (h *Handler) saveTraceWithState(ctx context.Context, trace *core.Trace, msg *boc.Cell, hash string) {
+	var validUntil uint32
+	if v5, err := tongoWallet.DecodeMessageV5(msg); err == nil {
+		if v5.SumType == "SignedExternal" {
+			validUntil = v5.SignedExternal.ValidUntil
+		}
+	} else if v4, err := tongoWallet.DecodeMessageV4(msg); err == nil {
+		validUntil = v4.ValidUntil
+	} else if v3, err := tongoWallet.DecodeMessageV3(msg); err == nil {
+		validUntil = v3.ValidUntil
+	}
+	var ttl time.Duration
+	if validUntil == 0 {
+		ttl = 24 * time.Hour
+		h.logger.Info("Couldn't determine trace TTL, default is 24 hours", zap.String("hash", hash))
+	} else {
+		ttl = min(time.Until(time.Unix(int64(validUntil), 0)), 24*time.Hour)
+	}
+	if ttl <= 0 {
+		traceTTL.Observe(0) // trace expired
+		return
+	}
+	traceTTL.Observe(ttl.Seconds())
+	err := h.storage.SaveTraceWithState(ctx, hash, trace, h.tongoVersion, []abi.MethodInvocation{}, ttl)
+	if err != nil {
+		h.logger.Warn("trace not saved: ", zap.Error(err))
+		savedEmulatedTraces.WithLabelValues("error_save").Inc()
+		return
+	}
+	savedEmulatedTraces.WithLabelValues("success").Inc()
+}
+
+func EmulatedTreeToTrace(
 	ctx context.Context,
 	executor executor,
 	resolver core.LibraryResolver,
@@ -186,6 +219,7 @@ func emulatedTreeToTrace(
 	accounts map[tongo.AccountID]tlb.ShardAccount,
 	inspectionCache map[ton.AccountID]*abi.ContractDescription,
 	configPool *sync.Pool,
+	filterOutMessages bool,
 ) (*core.Trace, error) {
 	if !tree.TX.Msgs.InMsg.Exists {
 		return nil, errors.New("there is no incoming message in emulation result")
@@ -203,53 +237,76 @@ func emulatedTreeToTrace(
 	default:
 		return nil, errors.New("unknown message type in emulation result")
 	}
-	transaction, err := core.ConvertTransaction(int32(a.AddrStd.WorkchainId), tongo.Transaction{
-		Transaction: tree.TX,
-		BlockID:     tongo.BlockIDExt{BlockID: tongo.BlockID{Workchain: int32(a.AddrStd.WorkchainId)}},
-	}, nil)
-	filteredMsgs := make([]core.Message, 0, len(transaction.OutMsgs))
-	for _, msg := range transaction.OutMsgs {
-		if msg.Destination == nil {
-			filteredMsgs = append(filteredMsgs, msg)
-		}
-	}
-	transaction.OutMsgs = filteredMsgs //all internal messages in emulation result are delivered to another account and created transaction
+
+	acc, err := ton.AccountIDFromTlb(a)
 	if err != nil {
 		return nil, err
 	}
+	if acc == nil {
+		return nil, errors.New("invalid account ID")
+	}
+	accountID := *acc
+	var (
+		inspectionResult *abi.ContractDescription
+		ok               bool
+		sharedExecutor   *shardsAccountExecutor
+	)
+	code := accountCode(accounts[accountID])
+	if code != nil {
+		b, err := code.ToBoc()
+		if err != nil {
+			return nil, err
+		}
+		codeHash, err := code.HashString()
+		if err != nil {
+			return nil, err
+		}
+		emulatedAccountCode.WithLabelValues(codeHash).Inc()
+		sharedExecutor = newSharedAccountExecutor(accounts, executor, resolver, configPool)
+		inspectionResult, ok = inspectionCache[accountID]
+		if !ok {
+			inspectionResult, err = abi.NewContractInspector(abi.InspectWithLibraryResolver(resolver)).InspectContract(ctx, b, sharedExecutor, accountID)
+			if err != nil {
+				return nil, err
+			}
+			inspectionCache[accountID] = inspectionResult
+		}
+	}
+
+	transaction, err := core.ConvertTransaction(int32(a.AddrStd.WorkchainId), tongo.Transaction{
+		Transaction: tree.TX,
+		BlockID:     tongo.BlockIDExt{BlockID: tongo.BlockID{Workchain: int32(a.AddrStd.WorkchainId)}},
+	}, inspectionResult)
+	if err != nil {
+		return nil, err
+	}
+	if transaction == nil {
+		return nil, errors.New("converted transaction is nil")
+	}
+	if filterOutMessages {
+		filteredMsgs := make([]core.Message, 0, len(transaction.OutMsgs))
+		for _, msg := range transaction.OutMsgs {
+			if msg.Destination == nil {
+				filteredMsgs = append(filteredMsgs, msg)
+			}
+		}
+		transaction.OutMsgs = filteredMsgs //all internal messages in emulation result are delivered to another account and created transaction
+	}
+	transaction.Emulated = true
 	t := &core.Trace{
 		Transaction: *transaction,
 	}
 	additionalInfo := &core.TraceAdditionalInfo{}
 	for i := range tree.Children {
-		child, err := emulatedTreeToTrace(ctx, executor, resolver, tree.Children[i], accounts, inspectionCache, configPool)
+		child, err := EmulatedTreeToTrace(ctx, executor, resolver, tree.Children[i], accounts, inspectionCache, configPool, filterOutMessages)
 		if err != nil {
 			return nil, err
 		}
 		t.Children = append(t.Children, child)
 	}
-	accountID := t.Account
-	code := accountCode(accounts[accountID])
-	if code == nil {
+
+	if sharedExecutor == nil {
 		return t, nil
-	}
-	b, err := code.ToBoc()
-	if err != nil {
-		return nil, err
-	}
-	codeHash, err := code.HashString()
-	if err != nil {
-		return nil, err
-	}
-	emulatedAccountCode.WithLabelValues(codeHash).Inc()
-	sharedExecutor := newSharedAccountExecutor(accounts, executor, resolver, configPool)
-	inspectionResult, ok := inspectionCache[accountID]
-	if !ok {
-		inspectionResult, err = abi.NewContractInspector(abi.InspectWithLibraryResolver(resolver)).InspectContract(ctx, b, sharedExecutor, accountID)
-		if err != nil {
-			return nil, err
-		}
-		inspectionCache[accountID] = inspectionResult
 	}
 
 	// TODO: for all obtained Jetton Masters confirm that jetton wallets are valid
@@ -341,45 +398,62 @@ func emulatedTreeToTrace(
 				Item:     *item,
 			}
 		case abi.GetPoolData_StonfiResult:
-			t0, err0 := ton.AccountIDFromTlb(data.Token0Address)
-			t1, err1 := ton.AccountIDFromTlb(data.Token1Address)
-			if err1 != nil || err0 != nil {
-				continue
-			}
-			additionalInfo.STONfiPool = &core.STONfiPool{
-				Token0: *t0,
-				Token1: *t1,
-			}
-			for _, accountID := range []ton.AccountID{*t0, *t1} {
-				_, value, err := abi.GetWalletData(ctx, sharedExecutor, accountID)
-				if err != nil {
-					return nil, err
-				}
-				data := value.(abi.GetWalletDataResult)
-				master, _ := ton.AccountIDFromTlb(data.Jetton)
-				additionalInfo.SetJettonMaster(accountID, *master)
-			}
+			getAdditionalInfoStonfi(ctx, sharedExecutor, additionalInfo, data.Token0Address, data.Token1Address)
 		case abi.GetPoolData_StonfiV2Result:
-			t0, err0 := ton.AccountIDFromTlb(data.Token0WalletAddress)
-			t1, err1 := ton.AccountIDFromTlb(data.Token1WalletAddress)
-			if err1 != nil || err0 != nil {
+			getAdditionalInfoStonfi(ctx, sharedExecutor, additionalInfo, data.Token0WalletAddress, data.Token1WalletAddress)
+		case abi.GetPoolData_StonfiV2StableswapResult:
+			getAdditionalInfoStonfi(ctx, sharedExecutor, additionalInfo, data.Token0WalletAddress, data.Token1WalletAddress)
+		case abi.GetPoolData_StonfiV2WeightedStableswapResult:
+			getAdditionalInfoStonfi(ctx, sharedExecutor, additionalInfo, data.Token0WalletAddress, data.Token1WalletAddress)
+		case abi.GetPaymentInfo_SubscriptionV2Result:
+			if additionalInfo.SubscriptionInfo == nil {
+				additionalInfo.SubscriptionInfo = &core.SubscriptionInfo{
+					PaymentPerPeriod: int64(data.PaymentPerPeriod),
+				}
+			} else {
+				additionalInfo.SubscriptionInfo.PaymentPerPeriod = int64(data.PaymentPerPeriod)
+			}
+		case abi.GetSubscriptionInfo_V2Result:
+			wallet, err0 := ton.AccountIDFromTlb(data.Wallet)
+			admin, err1 := ton.AccountIDFromTlb(data.Admin)
+			withdrawTo, err2 := ton.AccountIDFromTlb(data.WithdrawAddress)
+			if err0 != nil || err1 != nil || err2 != nil || wallet == nil || admin == nil || withdrawTo == nil {
 				continue
 			}
-			additionalInfo.STONfiPool = &core.STONfiPool{
-				Token0: *t0,
-				Token1: *t1,
-			}
-			for _, accountID := range []ton.AccountID{*t0, *t1} {
-				_, value, err := abi.GetWalletData(ctx, sharedExecutor, accountID)
-				if err != nil {
-					return nil, err
+			if additionalInfo.SubscriptionInfo == nil {
+				additionalInfo.SubscriptionInfo = &core.SubscriptionInfo{
+					Wallet:     *wallet,
+					Admin:      *admin,
+					WithdrawTo: *withdrawTo,
 				}
-				data := value.(abi.GetWalletDataResult)
-				master, _ := ton.AccountIDFromTlb(data.Jetton)
-				additionalInfo.SetJettonMaster(accountID, *master)
+			} else {
+				additionalInfo.SubscriptionInfo.Wallet = *wallet
+				additionalInfo.SubscriptionInfo.Admin = *admin
+				additionalInfo.SubscriptionInfo.WithdrawTo = *withdrawTo
 			}
 		}
 	}
 	t.SetAdditionalInfo(additionalInfo)
 	return t, nil
+}
+
+func getAdditionalInfoStonfi(ctx context.Context, sharedExecutor *shardsAccountExecutor, additionalInfo *core.TraceAdditionalInfo, token0, token1 tlb.MsgAddress) {
+	t0, err0 := ton.AccountIDFromTlb(token0)
+	t1, err1 := ton.AccountIDFromTlb(token1)
+	if err1 != nil || err0 != nil {
+		return
+	}
+	additionalInfo.STONfiPool = &core.STONfiPool{
+		Token0: *t0,
+		Token1: *t1,
+	}
+	for _, accountID := range []ton.AccountID{*t0, *t1} {
+		_, value, err := abi.GetWalletData(ctx, sharedExecutor, accountID)
+		if err != nil {
+			continue
+		}
+		data := value.(abi.GetWalletDataResult)
+		master, _ := ton.AccountIDFromTlb(data.Jetton)
+		additionalInfo.SetJettonMaster(accountID, *master)
+	}
 }

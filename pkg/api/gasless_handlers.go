@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/tonkeeper/opentonapi/pkg/gasless"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
 	"github.com/tonkeeper/tongo/ton"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/metadata"
 )
 
 func (h *Handler) GaslessConfig(ctx context.Context) (*oas.GaslessConfig, error) {
@@ -18,6 +22,7 @@ func (h *Handler) GaslessConfig(ctx context.Context) (*oas.GaslessConfig, error)
 	}
 	config, err := h.gasless.Config(ctx)
 	if err != nil {
+		h.logger.Warn("failed to get gasless config", zap.Error(err))
 		return nil, toError(http.StatusInternalServerError, fmt.Errorf("failed to get gasless config"))
 	}
 	o := &oas.GaslessConfig{
@@ -50,7 +55,19 @@ func (h *Handler) GaslessEstimate(ctx context.Context, req *oas.GaslessEstimateR
 	for _, msg := range req.Messages {
 		messages = append(messages, msg.Boc)
 	}
-	signParams, err := h.gasless.Estimate(ctx, masterID, walletAddress, publicKey, messages)
+	if params.AcceptLanguage.IsSet() {
+		meta := metadata.Pairs("accept-language", params.AcceptLanguage.Value)
+		ctx = metadata.NewOutgoingContext(context.Background(), meta)
+	}
+	estimationParams := gasless.EstimationParams{
+		MasterID:                     masterID,
+		WalletAddress:                walletAddress,
+		WalletPublicKey:              publicKey,
+		Messages:                     messages,
+		ReturnEmulation:              req.ReturnEmulation.Value,
+		ThrowErrorIfNotEnoughJettons: req.ThrowErrorIfNotEnoughJettons.Value,
+	}
+	signParams, err := h.gasless.Estimate(ctx, estimationParams)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
@@ -59,6 +76,14 @@ func (h *Handler) GaslessEstimate(ctx context.Context, req *oas.GaslessEstimateR
 		Commission:   signParams.Commission,
 		From:         walletAddress.ToRaw(),
 		ValidUntil:   time.Now().UTC().Add(4 * time.Minute).Unix(),
+		ProtocolName: signParams.ProtocolName,
+	}
+	if len(signParams.EmulationResults) > 0 {
+		var msgConsequences oas.MessageConsequences
+		if err := json.Unmarshal(signParams.EmulationResults, &msgConsequences); err != nil {
+			return nil, toError(http.StatusInternalServerError, fmt.Errorf("failed to unmarshal emulation results"))
+		}
+		o.Emulation = oas.NewOptMessageConsequences(msgConsequences)
 	}
 	o.Messages = make([]oas.SignRawMessage, 0, len(signParams.Messages))
 	for _, msg := range signParams.Messages {
@@ -77,23 +102,32 @@ func (h *Handler) GaslessEstimate(ctx context.Context, req *oas.GaslessEstimateR
 	return o, nil
 }
 
-func (h *Handler) GaslessSend(ctx context.Context, req *oas.GaslessSendReq) error {
+func (h *Handler) GaslessSend(ctx context.Context, req *oas.GaslessSendReq) (*oas.GaslessTx, error) {
 	if h.gasless == nil {
-		return toError(http.StatusNotImplemented, fmt.Errorf("not implemented"))
+		return nil, toError(http.StatusNotImplemented, fmt.Errorf("not implemented"))
 	}
 	msg, err := decodeMessage(req.Boc)
 	if err != nil {
-		return toError(http.StatusBadRequest, err)
+		return nil, toError(http.StatusBadRequest, err)
 	}
-	pubkey, err := hex.DecodeString(req.WalletPublicKey)
+	var pubkey []byte
+	if req.WalletPublicKey.IsSet() {
+		p, err := hex.DecodeString(req.WalletPublicKey.Value)
+		if err != nil {
+			return nil, toError(http.StatusBadRequest, fmt.Errorf("invalid public key"))
+		}
+		if len(p) != ed25519.PublicKeySize {
+			return nil, toError(http.StatusBadRequest, fmt.Errorf("invalid public key"))
+		}
+		pubkey = p
+	}
+	results, err := h.gasless.Send(ctx, pubkey, msg.payload)
 	if err != nil {
-		return toError(http.StatusBadRequest, err)
+		return nil, toError(http.StatusInternalServerError, err)
 	}
-	if len(pubkey) != ed25519.PublicKeySize {
-		return toError(http.StatusBadRequest, fmt.Errorf("invalid public key"))
+	tx := &oas.GaslessTx{ProtocolName: results.ProtocolName}
+	if results.External != nil {
+		tx.External = oas.NewOptString(*results.External)
 	}
-	if err := h.gasless.Send(ctx, pubkey, msg.payload); err != nil {
-		return toError(http.StatusInternalServerError, err)
-	}
-	return nil
+	return tx, nil
 }

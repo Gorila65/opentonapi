@@ -8,21 +8,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
-	"golang.org/x/exp/maps"
+	"maps"
 
-	"github.com/tonkeeper/opentonapi/pkg/addressbook"
-	"golang.org/x/exp/slices"
+	"go.uber.org/zap"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/go-faster/jx"
 	"github.com/tonkeeper/opentonapi/internal/g"
+	"github.com/tonkeeper/opentonapi/pkg/addressbook"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
 	"github.com/tonkeeper/tongo"
@@ -53,6 +53,49 @@ func (h *Handler) GetBlockchainRawAccount(ctx context.Context, params oas.GetBlo
 	return &res, nil
 }
 
+func (h *Handler) GetBlockchainRawAccounts(ctx context.Context, request oas.OptGetBlockchainRawAccountsReq) (*oas.BlockchainRawAccounts, error) {
+	if len(request.Value.AccountIds) == 0 {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("empty list of ids"))
+	}
+	if !h.limits.isBulkQuantityAllowed(len(request.Value.AccountIds)) {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("the maximum number of accounts to request at once: %v", h.limits.BulkLimits))
+	}
+	ids := make([]tongo.AccountID, 0, len(request.Value.AccountIds))
+	pending := make(map[tongo.AccountID]struct{}, len(request.Value.AccountIds))
+	for _, str := range request.Value.AccountIds {
+		account, err := tongo.ParseAddress(str)
+		if err != nil {
+			return nil, toError(http.StatusBadRequest, err)
+		}
+		ids = append(ids, account.ID)
+		pending[account.ID] = struct{}{}
+	}
+	accounts, err := h.storage.GetRawAccounts(ctx, ids)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	results := make(map[ton.AccountID]oas.BlockchainRawAccount, len(ids))
+	for _, account := range accounts {
+		delete(pending, account.AccountAddress)
+		converted, err := convertToRawAccount(account)
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, err)
+		}
+		results[account.AccountAddress] = converted
+	}
+	for accountID := range pending {
+		results[accountID] = oas.BlockchainRawAccount{
+			Address: accountID.ToRaw(),
+			Status:  oas.AccountStatusNonexist,
+		}
+	}
+	resp := &oas.BlockchainRawAccounts{Accounts: make([]oas.BlockchainRawAccount, 0, len(ids))}
+	for _, id := range ids {
+		resp.Accounts = append(resp.Accounts, results[id])
+	}
+	return resp, nil
+}
+
 func (h *Handler) GetAccount(ctx context.Context, params oas.GetAccountParams) (*oas.Account, error) {
 	account, err := tongo.ParseAddress(params.AccountID)
 	if err != nil {
@@ -61,8 +104,9 @@ func (h *Handler) GetAccount(ctx context.Context, params oas.GetAccountParams) (
 	rawAccount, err := h.storage.GetRawAccount(ctx, account.ID)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return &oas.Account{
-			Address: account.ID.ToRaw(),
-			Status:  oas.AccountStatusNonexist,
+			Address:  account.ID.ToRaw(),
+			Status:   oas.AccountStatusNonexist,
+			IsWallet: true,
 		}, nil
 	}
 	if err != nil {
@@ -74,6 +118,19 @@ func (h *Handler) GetAccount(ctx context.Context, params oas.GetAccountParams) (
 		res = convertToAccount(rawAccount, &ab, h.state, h.spamFilter)
 	} else {
 		res = convertToAccount(rawAccount, nil, h.state, h.spamFilter)
+	}
+	if !res.IsScam.Value && isNftCollection(rawAccount) {
+		if meta, ok := h.metaCache.getCollectionMeta(ctx, account.ID); ok {
+			if h.spamFilter.HasBlacklistedComment(meta.Name, meta.Description) {
+				res.IsScam = oas.NewOptBool(true)
+			}
+		}
+	}
+	if strings.HasSuffix(params.AccountID, ".ton") {
+		trust := h.spamFilter.TonDomainTrust(params.AccountID)
+		if trust == core.TrustBlacklist {
+			res.IsScam = oas.NewOptBool(true)
+		}
 	}
 	if rawAccount.ExtraBalances != nil {
 		res.ExtraBalance = convertExtraCurrencies(rawAccount.ExtraBalances)
@@ -138,7 +195,7 @@ func (h *Handler) GetAccounts(ctx context.Context, request oas.OptGetAccountsReq
 	for _, i := range ids {
 		account := results[i]
 		if currencyPrice != 0 {
-			convertedAmount := float64(account.Balance/int64(ton.OneTON)) / currencyPrice
+			convertedAmount := float64(account.Balance/int64(ton.OneGRAM)) / currencyPrice
 			currenciesBalance := map[string]jx.Raw{currency: jx.Raw(fmt.Sprintf("%f", convertedAmount))}
 			account.CurrenciesBalance.SetTo(currenciesBalance)
 		}
@@ -170,12 +227,19 @@ func (h *Handler) GetBlockchainAccountTransactions(ctx context.Context, params o
 	result := oas.Transactions{
 		Transactions: make([]oas.Transaction, len(txs)),
 	}
+	if len(txs) == 0 {
+		return &result, nil
+	}
 	accountObject, err := h.storage.GetRawAccount(ctx, account.ID)
-	if err != nil {
-		return nil, err
+	if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	var interfaces []abi.ContractInterface
+	if accountObject != nil {
+		interfaces = accountObject.Interfaces
 	}
 	for i, tx := range txs {
-		result.Transactions[i] = convertTransaction(*tx, accountObject.Interfaces, h.addressBook)
+		result.Transactions[i] = h.convertTransaction(*tx, interfaces, h.addressBook)
 	}
 	return &result, nil
 }
@@ -204,15 +268,11 @@ func (h *Handler) ExecGetMethodForBlockchainAccount(ctx context.Context, params 
 		return nil, toError(http.StatusBadRequest, err)
 	}
 	contract, err := h.storage.GetContract(ctx, account.ID)
-	if err != nil {
-		if errors.Is(err, core.ErrEntityNotFound) {
-			return nil, toError(http.StatusNotFound, err)
-		}
-		return nil, toError(http.StatusInternalServerError, err)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusNotFound, err)
 	}
-	// TODO: remove parameter after user migration
-	if params.FixOrder.IsSet() && params.FixOrder.Value == true && len(params.Args) > 1 {
-		slices.Reverse(params.Args)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
 	}
 	key, err := getMethodCacheKey(account.ID, params.MethodName, contract.LastTransactionLt, params.Args)
 	if err != nil {
@@ -221,58 +281,70 @@ func (h *Handler) ExecGetMethodForBlockchainAccount(ctx context.Context, params 
 	if result, ok := h.getMethodsCache.Get(key); ok {
 		return result, nil
 	}
-	stack := make([]tlb.VmStackValue, 0, len(params.Args))
-	for i := len(params.Args) - 1; i >= 0; i-- {
-		r, err := stringToTVMStackRecord(params.Args[i])
+	stack := tlb.VmStack{}
+	for _, arg := range params.Args {
+		r, err := stringToTVMStackRecord(arg)
 		if err != nil {
-			return nil, toError(http.StatusBadRequest, fmt.Errorf("can't parse arg '%v' as any TVMStackValue", params.Args[i]))
+			return nil, toError(http.StatusBadRequest, fmt.Errorf("can't parse arg '%v' as any TVMStackValue", arg))
 		}
-		stack = append(stack, r) // we need to put the arguments on the stack in reverse order
+		stack.Put(r)
 	}
-	// RunSmcMethodByID fetches the contract from the storage on its own,
-	// and it can happen that the contract has been changed and has another lt,
-	// in this case, we get a correct result from the executor,
-	// but we update a previous cache entry that won't be used anymore.
-	exitCode, stack, err := h.executor.RunSmcMethodByID(ctx, account.ID, utils.MethodIdFromName(params.MethodName), stack)
+	result, err := h.execGetMethod(ctx, account.ID, params.MethodName, stack)
 	if err != nil {
-		if errors.Is(err, core.ErrEntityNotFound) {
-			return nil, toError(http.StatusNotFound, err)
-		}
+		return nil, err
+	}
+	h.getMethodsCache.Set(key, result)
+	return result, nil
+}
+
+func (h *Handler) ExecGetMethodWithBodyForBlockchainAccount(ctx context.Context, request oas.OptExecGetMethodWithBodyForBlockchainAccountReq, params oas.ExecGetMethodWithBodyForBlockchainAccountParams) (*oas.MethodExecutionResult, error) {
+	account, err := tongo.ParseAddress(params.AccountID)
+	if err != nil {
+		return nil, toError(http.StatusBadRequest, err)
+	}
+	contract, err := h.storage.GetContract(ctx, account.ID)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusNotFound, err)
+	}
+	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	result := oas.MethodExecutionResult{
-		Success:  exitCode == 0 || exitCode == 1,
-		ExitCode: int(exitCode),
-		Stack:    make([]oas.TvmStackRecord, 0, len(stack)),
+	args := request.Value.Args
+	convertedArgs := make([]string, len(args))
+	for idx, item := range args {
+		convertedArgs[idx] = item.Value
 	}
-	for i := range stack {
-		value, err := convertTvmStackValue(stack[i])
+	key, err := getMethodCacheKey(account.ID, params.MethodName, contract.LastTransactionLt, convertedArgs)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	if result, ok := h.getMethodsCache.Get(key); ok {
+		return result, nil
+	}
+	stack := tlb.VmStack{}
+	for _, arg := range args {
+		r, err := parseExecGetMethodArgs(arg)
 		if err != nil {
-			return nil, toError(http.StatusInternalServerError, err)
+			return nil, toError(http.StatusBadRequest, fmt.Errorf("can't parse arg '%v': %v", arg, err))
 		}
-		result.Stack = append(result.Stack, value)
+		stack.Put(r)
 	}
-	for _, decoder := range abi.KnownGetMethodsDecoder[params.MethodName] {
-		_, v, err := decoder(stack)
-		if err == nil {
-			value, err := json.Marshal(v)
-			if err != nil {
-				return nil, toError(http.StatusInternalServerError, err)
-			}
-			result.SetDecoded(g.ChangeJsonKeys(value, g.CamelToSnake))
-			break
-		}
+	result, err := h.execGetMethod(ctx, account.ID, params.MethodName, stack)
+	if err != nil {
+		return nil, err
 	}
-	h.getMethodsCache.Set(key, &result)
-	return &result, nil
+	h.getMethodsCache.Set(key, result)
+	return result, nil
 }
 
 func (h *Handler) SearchAccounts(ctx context.Context, params oas.SearchAccountsParams) (*oas.FoundAccounts, error) {
 	attachedAccounts := h.addressBook.SearchAttachedAccountsByPrefix(params.Name)
 	accounts := make([]addressbook.AttachedAccount, 0, len(attachedAccounts))
 	for _, account := range attachedAccounts {
-		if account.Symbol != "" {
-			trust := h.spamFilter.JettonTrust(account.Wallet, account.Symbol, account.Name, account.Preview)
+		if (account.Type == addressbook.JettonNameAccountType || account.Type == addressbook.JettonSymbolAccountType) &&
+			account.Trust != core.TrustWhitelist {
+			// name has " · jetton" suffix, slug is the original name
+			trust := h.spamFilter.JettonTrust(account.Wallet, account.Symbol, account.Slug, account.Preview)
 			if trust == core.TrustBlacklist {
 				continue
 			}
@@ -404,25 +476,22 @@ func (h *Handler) GetAccountSubscriptions(ctx context.Context, params oas.GetAcc
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	subscriptions, err := h.storage.GetSubscriptions(ctx, account.ID)
+	subscriptionsV1, err := h.storage.GetSubscriptionsV1(ctx, account.ID)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	subscriptionsV2, err := h.storage.GetSubscriptionsV2(ctx, account.ID)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
 	var response oas.Subscriptions
-	for _, subscription := range subscriptions {
-		response.Subscriptions = append(response.Subscriptions, oas.Subscription{
-			Address:            subscription.AccountID.ToRaw(),
-			WalletAddress:      subscription.WalletAccountID.ToRaw(),
-			BeneficiaryAddress: subscription.BeneficiaryAccountID.ToRaw(),
-			Amount:             subscription.Amount,
-			Period:             subscription.Period,
-			StartTime:          subscription.StartTime,
-			Timeout:            subscription.Timeout,
-			LastPaymentTime:    subscription.LastPaymentTime,
-			LastRequestTime:    subscription.LastRequestTime,
-			SubscriptionID:     subscription.SubscriptionID,
-			FailedAttempts:     subscription.FailedAttempts,
-		})
+	for _, subscription := range subscriptionsV1 {
+		sub := h.convertSubscriptionsV1(ctx, subscription)
+		response.Subscriptions = append(response.Subscriptions, sub)
+	}
+	for _, subscription := range subscriptionsV2 {
+		sub := h.convertSubscriptionsV2(ctx, subscription)
+		response.Subscriptions = append(response.Subscriptions, sub)
 	}
 	return &response, nil
 }
@@ -432,7 +501,7 @@ func (h *Handler) GetAccountTraces(ctx context.Context, params oas.GetAccountTra
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	traceIDs, err := h.storage.SearchTraces(ctx, account.ID, params.Limit.Value, optIntToPointer(params.BeforeLt), nil, nil, false)
+	traceIDs, err := h.storage.SearchTraces(ctx, account.ID, params.Limit.Value, optIntToPointer(params.BeforeLt), nil, nil, nil, false, true)
 	if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -460,28 +529,65 @@ func (h *Handler) GetAccountDiff(ctx context.Context, params oas.GetAccountDiffP
 	return &oas.GetAccountDiffOK{BalanceChange: balanceChange}, nil
 }
 
-func (h *Handler) GetAccountNftHistory(ctx context.Context, params oas.GetAccountNftHistoryParams) (*oas.AccountEvents, error) {
+func (h *Handler) GetAccountNftHistory(ctx context.Context, params oas.GetAccountNftHistoryParams) (*oas.NftOperations, error) {
 	account, err := tongo.ParseAddress(params.AccountID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	traceIDs, err := h.storage.GetAccountNftsHistory(ctx, account.ID, params.Limit, optIntToPointer(params.BeforeLt), optIntToPointer(params.StartDate), optIntToPointer(params.EndDate))
+	history, err := h.storage.GetAccountNftsHistory(ctx, account.ID, params.Limit, optIntToPointer(params.BeforeLt), nil, nil)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return &oas.NftOperations{}, nil
+	}
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	var eventIDs []string
-	for _, traceID := range traceIDs {
-		eventIDs = append(eventIDs, traceID.Hex())
+	if len(history) == 0 {
+		return &oas.NftOperations{}, nil
 	}
-	isBannedTraces, err := h.spamFilter.GetEventsScamData(ctx, eventIDs)
-	if err != nil {
-		h.logger.Warn("error getting events spam data", zap.Error(err))
+	// Resolve every NFT touched by this page in one shot, so each operation carries real
+	// metadata and trust instead of an empty placeholder item.
+	nftIDs := make([]ton.AccountID, 0, len(history))
+	seen := make(map[ton.AccountID]struct{}, len(history))
+	for _, op := range history {
+		if _, ok := seen[op.Nft]; ok {
+			continue
+		}
+		seen[op.Nft] = struct{}{}
+		nftIDs = append(nftIDs, op.Nft)
 	}
-	events, lastLT, err := h.convertNftHistory(ctx, account.ID, traceIDs, isBannedTraces, params.AcceptLanguage)
-	if err != nil {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var nftsScamData map[ton.AccountID]core.TrustType
+	go func() {
+		defer wg.Done()
+		var err error
+		nftsScamData, err = h.spamFilter.GetNftsScamData(ctx, nftIDs)
+		if err != nil {
+			h.logger.Warn("error getting nft scam data", zap.Error(err))
+		}
+	}()
+	items, err := h.storage.GetNFTs(ctx, nftIDs)
+	wg.Wait()
+	if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	return &oas.AccountEvents{Events: events, NextFrom: lastLT}, nil
+	nfts := make(map[ton.AccountID]core.NftItem, len(items))
+	for _, item := range items {
+		nfts[item.Address] = item
+	}
+
+	res := oas.NftOperations{}
+	for _, op := range history {
+		nft, ok := nfts[op.Nft]
+		if !ok {
+			nft = core.NftItem{Address: op.Nft}
+		}
+		res.Operations = append(res.Operations, h.convertNftOperation(ctx, op, nft, nftsScamData[op.Nft]))
+		if len(res.Operations) == params.Limit {
+			res.NextFrom = oas.NewOptInt64(int64(op.Lt))
+		}
+	}
+	return &res, nil
 }
 
 func (h *Handler) BlockchainAccountInspect(ctx context.Context, params oas.BlockchainAccountInspectParams) (*oas.BlockchainAccountInspect, error) {
@@ -490,8 +596,14 @@ func (h *Handler) BlockchainAccountInspect(ctx context.Context, params oas.Block
 		return nil, toError(http.StatusBadRequest, err)
 	}
 	rawAccount, err := h.storage.GetRawAccount(ctx, account.ID)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusNotFound, err)
+	}
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
+	}
+	if len(rawAccount.Code) == 0 {
+		return nil, toError(http.StatusNotFound, fmt.Errorf("account has no code"))
 	}
 	cells, err := boc.DeserializeBoc(rawAccount.Code)
 	if err != nil {
@@ -535,10 +647,10 @@ func (h *Handler) BlockchainAccountInspect(ctx context.Context, params oas.Block
 		resp.Source = oas.NewOptSource(oas.Source{Files: sourceFiles})
 	}
 	knownMethods := make(map[int64]string)
-	for _, name := range maps.Keys(abi.KnownGetMethodsDecoder) {
+	for name := range maps.Keys(abi.KnownGetMethodsDecoder) {
 		knownMethods[int64(utils.MethodIdFromName(name))] = name
 	}
-	for _, methodID := range maps.Keys(info.Methods) {
+	for methodID := range maps.Keys(info.Methods) {
 		if method, ok := knownMethods[methodID]; ok {
 			resp.Methods = append(resp.Methods, oas.Method{
 				ID:     methodID,
@@ -637,4 +749,100 @@ func (h *Handler) AddressParse(ctx context.Context, params oas.AddressParseParam
 
 func (h *Handler) GetAccountExtraCurrencyHistoryByID(ctx context.Context, params oas.GetAccountExtraCurrencyHistoryByIDParams) (*oas.AccountEvents, error) {
 	return &oas.AccountEvents{}, nil
+}
+
+func (h *Handler) execGetMethod(ctx context.Context, accountID ton.AccountID, methodName string, args tlb.VmStack) (*oas.MethodExecutionResult, error) {
+	// Execute the smart contract method by account ID and method name.
+	// Note: RunSmcMethodByID fetches the latest state of the contract.
+	// If the contract has changed and has a different logical time (lt),
+	// we may return a valid result, but cache an outdated entry.
+	exitCode, stack, err := h.executor.RunSmcMethodByID(ctx, accountID, utils.MethodIdFromName(methodName), args)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusNotFound, err)
+	}
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	result := oas.MethodExecutionResult{
+		Success:  exitCode == 0 || exitCode == 1,
+		ExitCode: int(exitCode),
+		Stack:    make([]oas.TvmStackRecord, 0, stack.Len()),
+	}
+	for i := range stack.Len() {
+		value, err := convertTvmStackValue(stack.Peek(stack.Len() - i - 1))
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, err)
+		}
+		result.Stack = append(result.Stack, value)
+	}
+	for _, decoder := range abi.KnownGetMethodsDecoder[methodName] {
+		_, v, err := decoder(stack)
+		if err == nil {
+			value, err := json.Marshal(v)
+			if err != nil {
+				return nil, toError(http.StatusInternalServerError, err)
+			}
+			result.SetDecoded(g.ChangeJsonKeys(value, g.CamelToSnake))
+			break
+		}
+	}
+	return &result, nil
+}
+
+func (h *Handler) convertSubscriptionsV2(ctx context.Context, sub core.SubscriptionV2) oas.Subscription {
+	res := oas.Subscription{
+		Type:           "v2",
+		Period:         sub.Period,
+		SubscriptionID: fmt.Sprintf("%d", sub.SubscriptionID),
+		Wallet:         convertAccountAddress(sub.WalletAccountID, h.addressBook),
+		NextChargeAt:   sub.ChargeDate,
+	}
+	res.Address.SetTo(sub.AccountID.ToRaw())
+	res.Beneficiary.SetTo(convertAccountAddress(sub.WithdrawAccountID, h.addressBook))
+	res.Admin.SetTo(convertAccountAddress(sub.AdminAccountID, h.addressBook))
+	switch sub.ContractState {
+	case 0:
+		res.Status = oas.SubscriptionStatusNotReady
+	case 1:
+		if time.Now().Unix() > sub.ChargeDate+sub.GracePeriod { // grace period expired
+			res.Status = oas.SubscriptionStatusCancelled
+		} else {
+			res.Status = oas.SubscriptionStatusActive
+		}
+	case 2:
+		res.Status = oas.SubscriptionStatusCancelled
+	}
+	if len(sub.Metadata) > 0 {
+		res.Metadata.SetEncryptedBinary(fmt.Sprintf("%x", sub.Metadata))
+	}
+	res.PaymentPerPeriod = h.convertPrice(ctx, core.Price{
+		Currency: core.Currency{Type: core.CurrencyNative},
+		Amount:   *big.NewInt(sub.PaymentPerPeriod),
+	})
+	return res
+}
+
+func (h *Handler) convertSubscriptionsV1(ctx context.Context, sub core.SubscriptionV1) oas.Subscription {
+	res := oas.Subscription{
+		Type:           "v1",
+		Period:         sub.Period,
+		SubscriptionID: fmt.Sprintf("%d", sub.SubscriptionID),
+		Wallet:         convertAccountAddress(sub.WalletAccountID, h.addressBook),
+	}
+	now := time.Now().Unix()
+	timeslot := max((now-sub.StartTime)/sub.Period, 0)
+	res.NextChargeAt = sub.StartTime + sub.Period*timeslot
+	res.Address.SetTo(sub.AccountID.ToRaw())
+	beneficiary := convertAccountAddress(sub.BeneficiaryAccountID, h.addressBook)
+	res.Beneficiary.SetTo(beneficiary)
+	res.Admin.SetTo(beneficiary)
+	res.Status = oas.SubscriptionStatusCancelled
+	if sub.Status == tlb.AccountActive {
+		res.Status = oas.SubscriptionStatusActive
+	}
+	res.PaymentPerPeriod = h.convertPrice(ctx, core.Price{
+		Currency: core.Currency{Type: core.CurrencyNative},
+		Amount:   *big.NewInt(sub.Amount),
+	})
+	return res
 }

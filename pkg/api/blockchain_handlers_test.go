@@ -3,7 +3,12 @@ package api
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
+
+	"github.com/tonkeeper/opentonapi/pkg/addressbook"
+	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/tongo"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tonkeeper/opentonapi/pkg/litestorage"
@@ -14,12 +19,21 @@ import (
 )
 
 func TestHandler_GetRawBlockchainConfig(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	logger := zap.L()
 	cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 	require.Nil(t, err)
-	liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+	liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 	require.Nil(t, err)
-	h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+	book := &mockAddressBook{
+		OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+			return addressbook.KnownAddress{}, false
+		},
+	}
+	h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book))
 	require.Nil(t, err)
 	cfg, err := h.GetRawBlockchainConfig(context.Background())
 	require.Nil(t, err)
@@ -27,6 +41,10 @@ func TestHandler_GetRawBlockchainConfig(t *testing.T) {
 }
 
 func TestHandler_GetRawBlockchainConfigFromBlock(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name              string
 		params            oas.GetRawBlockchainConfigFromBlockParams
@@ -82,9 +100,14 @@ func TestHandler_GetRawBlockchainConfigFromBlock(t *testing.T) {
 			logger := zap.L()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
-			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					return addressbook.KnownAddress{}, false
+				},
+			}
+			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book))
 			require.Nil(t, err)
 			cfg, err := h.GetRawBlockchainConfigFromBlock(context.Background(), tt.params)
 			if len(tt.wantErr) > 0 {
@@ -105,6 +128,10 @@ func TestHandler_GetRawBlockchainConfigFromBlock(t *testing.T) {
 }
 
 func TestHandler_GetBlockchainConfigFromBlock(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name              string
 		params            oas.GetBlockchainConfigFromBlockParams
@@ -131,9 +158,14 @@ func TestHandler_GetBlockchainConfigFromBlock(t *testing.T) {
 			logger := zap.L()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
-			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					return addressbook.KnownAddress{}, false
+				},
+			}
+			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book))
 			require.Nil(t, err)
 			_, err = h.GetBlockchainConfigFromBlock(context.Background(), tt.params)
 			if len(tt.wantErr) > 0 {
@@ -149,12 +181,21 @@ func TestHandler_GetBlockchainConfigFromBlock(t *testing.T) {
 }
 
 func TestHandler_GetBlockchainValidators(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	logger := zap.L()
 	cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 	require.Nil(t, err)
-	liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+	liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 	require.Nil(t, err)
-	h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+	book := &mockAddressBook{
+		OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+			return addressbook.KnownAddress{}, false
+		},
+	}
+	h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book))
 	require.Nil(t, err)
 	validators, err := h.GetBlockchainValidators(context.Background())
 	require.Nil(t, err)
@@ -177,6 +218,10 @@ func TestHandler_GetBlockchainValidators(t *testing.T) {
 }
 
 func TestHandler_GetBlockchainBlock(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name           string
 		blockID        string
@@ -198,9 +243,14 @@ func TestHandler_GetBlockchainBlock(t *testing.T) {
 			logger := zap.L()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
-			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					return addressbook.KnownAddress{}, false
+				},
+			}
+			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book))
 			require.Nil(t, err)
 			params := oas.GetBlockchainBlockParams{BlockID: tt.blockID}
 			block, err := h.GetBlockchainBlock(context.Background(), params)

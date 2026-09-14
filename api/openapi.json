@@ -82,14 +82,14 @@
     }
    },
    "currenciesQuery": {
-    "description": "accept ton and all possible fiat currencies, separated by commas",
+    "description": "accept gram and all possible fiat currencies, separated by commas",
     "explode": false,
     "in": "query",
     "name": "currencies",
     "required": false,
     "schema": {
      "example": [
-      "ton",
+      "gram",
       "usd",
       "rub"
      ],
@@ -166,6 +166,16 @@
     "schema": {
      "format": "int64",
      "type": "integer"
+    }
+   },
+   "hashParameter": {
+    "description": "hash in hex (without 0x) format",
+    "in": "path",
+    "name": "hash",
+    "required": true,
+    "schema": {
+     "example": "131D0C65055F04E9C19D687B51BC70F952FD9CA6F02C2801D3B89964A779DF85",
+     "type": "string"
     }
    },
    "hashQuery": {
@@ -342,7 +352,8 @@
     "required": false,
     "schema": {
      "example": [
-      "custom_payload"
+      "custom_payload",
+      "defi"
      ],
      "items": {
       "type": "string"
@@ -481,6 +492,12 @@
      "application/json": {
       "schema": {
        "properties": {
+        "address_override": {
+         "description": "Override the destination wallet address extracted from the BoC. Useful when the BoC was signed with a throwaway key and the real wallet address must be emulated against.",
+         "example": "0:97146a46acc2654y27947f14c4a4b14273e954f78bc017790b41208b0043200b",
+         "format": "address",
+         "type": "string"
+        },
         "boc": {
          "format": "cell",
          "type": "string"
@@ -519,6 +536,27 @@
     "description": "bag-of-cells serialized to base64/hex and additional parameters to configure emulation",
     "required": true
    },
+   "ExecGetMethodArgs": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "properties": {
+        "args": {
+         "items": {
+          "$ref": "#/components/schemas/ExecGetMethodArg"
+         },
+         "type": "array"
+        }
+       },
+       "required": [
+        "args"
+       ],
+       "type": "object"
+      }
+     }
+    },
+    "description": "Request body for executing a GET method on a blockchain account via POST. This format allows passing arguments in the request body instead of query parameters, which is especially useful for large or complex input data.\n"
+   },
    "GaslessSend": {
     "content": {
      "application/json": {
@@ -534,8 +572,7 @@
         }
        },
        "required": [
-        "boc",
-        "wallet_public_key"
+        "boc"
        ],
        "type": "object"
       }
@@ -563,6 +600,15 @@
           "type": "object"
          },
          "type": "array"
+        },
+        "return_emulation": {
+         "default": false,
+         "type": "boolean"
+        },
+        "throw_error_if_not_enough_jettons": {
+         "default": false,
+         "description": "TONAPI verifies that the account has enough jettons to pay the commission and make a transfer.",
+         "type": "boolean"
         },
         "wallet_address": {
          "format": "address",
@@ -613,6 +659,28 @@
      }
     },
     "description": "input parameters for contract get method"
+   },
+   "PublicKeys": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "properties": {
+        "public_keys": {
+         "items": {
+          "example": "d8519b83d5b04b17a706ef6d04f3566422be47c2b676b0823235d67b1ef4b1b2",
+          "type": "string"
+         },
+         "type": "array"
+        }
+       },
+       "required": [
+        "public_keys"
+       ],
+       "type": "object"
+      }
+     }
+    },
+    "description": "a list of hex-encoded ed25519 public keys"
    },
    "TonConnectProof": {
     "content": {
@@ -705,6 +773,9 @@
      "application/json": {
       "schema": {
        "properties": {
+        "details": {
+         "$ref": "#/components/schemas/InsufficientFunds"
+        },
         "error": {
          "type": "string"
         },
@@ -820,7 +891,7 @@
     "properties": {
      "address": {
       "example": "0:10C1073837B93FDAAD594284CE8B8EFF7B9CF25427440EB2FC682762E1471365",
-      "format": "address",
+      "format": "maybe-address",
       "type": "string"
      },
      "icon": {
@@ -850,7 +921,7 @@
     "type": "object"
    },
    "AccountEvent": {
-    "description": "An event is built on top of a trace which is a series of transactions caused by one inbound message. TonAPI looks for known patterns inside the trace and splits the trace into actions, where a single action represents a meaningful high-level operation like a Jetton Transfer or an NFT Purchase. Actions are expected to be shown to users. It is advised not to build any logic on top of actions because actions can be changed at any time.",
+    "description": "High-level view over a transaction trace caused by a single inbound message. TonAPI analyses the trace, detects known patterns and groups low-level transactions into user-facing actions (Jetton transfer, NFT purchase, etc.). Actions are a best-effort UI abstraction and may change; do not rely on them for protocol-critical logic.\n",
     "properties": {
      "account": {
       "$ref": "#/components/schemas/AccountAddress"
@@ -865,14 +936,20 @@
       "example": "e8b0e3fee4a26bd2317ac1f9952fcdc87dc08fdb617656b5202416323337372e",
       "type": "string"
      },
+     "ext_msg_hash": {
+      "description": "Normalized hash of the root external inbound message (hex).",
+      "example": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+      "type": "string"
+     },
      "extra": {
-      "description": "TODO",
+      "description": "Net Gram change for this account not explained by actions, in nanograms: extra = final_balance - initial_balance - sum(explicit Gram changes from actions). extra \u003c 0 - implicit fee, extra \u003e 0 - refund. For UI display only\n",
       "example": 3,
       "format": "int64",
-      "type": "integer"
+      "type": "integer",
+      "x-js-format": "bigint"
      },
      "in_progress": {
-      "description": "Event is not finished yet. Transactions still happening",
+      "description": "Event trace is not finished yet. Transactions still happening.",
       "example": false,
       "type": "boolean"
      },
@@ -886,6 +963,14 @@
       "format": "int64",
       "type": "integer",
       "x-js-format": "bigint"
+     },
+     "progress": {
+      "description": "Event completion ratio in [0,1]",
+      "example": 0.5,
+      "format": "float",
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
      },
      "timestamp": {
       "example": 1234567890,
@@ -901,11 +986,13 @@
      "is_scam",
      "lt",
      "in_progress",
-     "extra"
+     "extra",
+     "progress"
     ],
     "type": "object"
    },
    "AccountEvents": {
+    "description": "Paginated list of events for a single account.",
     "properties": {
      "events": {
       "items": {
@@ -940,6 +1027,26 @@
     "required": [
      "public_key",
      "address"
+    ],
+    "type": "object"
+   },
+   "AccountPurchases": {
+    "properties": {
+     "next_from": {
+      "example": 25713146000001,
+      "format": "int64",
+      "type": "integer"
+     },
+     "purchases": {
+      "items": {
+       "$ref": "#/components/schemas/Purchase"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "purchases",
+     "next_from"
     ],
     "type": "object"
    },
@@ -1062,14 +1169,26 @@
    },
    "Action": {
     "properties": {
+     "AddExtension": {
+      "$ref": "#/components/schemas/AddExtensionAction"
+     },
      "AuctionBid": {
       "$ref": "#/components/schemas/AuctionBidAction"
+     },
+     "BuyXTR": {
+      "$ref": "#/components/schemas/BuyXTRAction"
      },
      "ContractDeploy": {
       "$ref": "#/components/schemas/ContractDeployAction"
      },
      "DepositStake": {
       "$ref": "#/components/schemas/DepositStakeAction"
+     },
+     "DepositTokenStake": {
+      "$ref": "#/components/schemas/DepositTokenStakeAction"
+     },
+     "DepositXTR": {
+      "$ref": "#/components/schemas/DepositXTRAction"
      },
      "DomainRenew": {
       "$ref": "#/components/schemas/DomainRenewAction"
@@ -1083,11 +1202,11 @@
      "ExtraCurrencyTransfer": {
       "$ref": "#/components/schemas/ExtraCurrencyTransferAction"
      },
-     "InscriptionMint": {
-      "$ref": "#/components/schemas/InscriptionMintAction"
+     "FlawedJettonTransfer": {
+      "$ref": "#/components/schemas/FlawedJettonTransferAction"
      },
-     "InscriptionTransfer": {
-      "$ref": "#/components/schemas/InscriptionTransferAction"
+     "GasRelay": {
+      "$ref": "#/components/schemas/GasRelayAction"
      },
      "JettonBurn": {
       "$ref": "#/components/schemas/JettonBurnAction"
@@ -1101,11 +1220,26 @@
      "JettonTransfer": {
       "$ref": "#/components/schemas/JettonTransferAction"
      },
+     "LiquidityDeposit": {
+      "$ref": "#/components/schemas/LiquidityDepositAction"
+     },
      "NftItemTransfer": {
       "$ref": "#/components/schemas/NftItemTransferAction"
      },
      "NftPurchase": {
       "$ref": "#/components/schemas/NftPurchaseAction"
+     },
+     "OracleRequest": {
+      "$ref": "#/components/schemas/OracleRequestAction"
+     },
+     "Purchase": {
+      "$ref": "#/components/schemas/PurchaseAction"
+     },
+     "RemoveExtension": {
+      "$ref": "#/components/schemas/RemoveExtensionAction"
+     },
+     "SetSignatureAllowedAction": {
+      "$ref": "#/components/schemas/SetSignatureAllowedAction"
      },
      "SmartContractExec": {
       "$ref": "#/components/schemas/SmartContractAction"
@@ -1124,6 +1258,12 @@
      },
      "WithdrawStakeRequest": {
       "$ref": "#/components/schemas/WithdrawStakeRequestAction"
+     },
+     "WithdrawTokenStakeRequest": {
+      "$ref": "#/components/schemas/WithdrawTokenStakeRequestAction"
+     },
+     "WithdrawXTR": {
+      "$ref": "#/components/schemas/WithdrawXTRAction"
      },
      "base_transactions": {
       "items": {
@@ -1148,11 +1288,12 @@
       "enum": [
        "TonTransfer",
        "ExtraCurrencyTransfer",
+       "ContractDeploy",
        "JettonTransfer",
+       "FlawedJettonTransfer",
        "JettonBurn",
        "JettonMint",
        "NftItemTransfer",
-       "ContractDeploy",
        "Subscribe",
        "UnSubscribe",
        "AuctionBid",
@@ -1160,13 +1301,23 @@
        "DepositStake",
        "WithdrawStake",
        "WithdrawStakeRequest",
+       "ElectionsDepositStake",
+       "ElectionsRecoverStake",
        "JettonSwap",
        "SmartContractExec",
-       "ElectionsRecoverStake",
-       "ElectionsDepositStake",
        "DomainRenew",
-       "InscriptionTransfer",
-       "InscriptionMint",
+       "Purchase",
+       "AddExtension",
+       "RemoveExtension",
+       "SetSignatureAllowedAction",
+       "GasRelay",
+       "DepositTokenStake",
+       "WithdrawTokenStakeRequest",
+       "LiquidityDeposit",
+       "OracleRequest",
+       "BuyXTR",
+       "DepositXTR",
+       "WithdrawXTR",
        "Unknown"
       ],
       "example": "TonTransfer",
@@ -1242,15 +1393,20 @@
       "type": "string"
      },
      "description": {
-      "example": "Transferring 5 Ton",
+      "example": "Transferring 5 Gram",
+      "type": "string"
+     },
+     "fiat_value": {
+      "description": "the value of this action expressed in the requested fiat currency.",
+      "example": "4.99 USD",
       "type": "string"
      },
      "name": {
-      "example": "Ton Transfer",
+      "example": "Gram Transfer",
       "type": "string"
      },
      "value": {
-      "example": "5 Ton",
+      "example": "5 Gram",
       "type": "string"
      },
      "value_image": {
@@ -1262,6 +1418,23 @@
      "name",
      "description",
      "accounts"
+    ],
+    "type": "object"
+   },
+   "AddExtensionAction": {
+    "properties": {
+     "extension": {
+      "example": "0:10C1073837B93FDAAD594284CE8B8EFF7B9CF25427440EB2FC682762E1471365",
+      "format": "address",
+      "type": "string"
+     },
+     "wallet": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "wallet",
+     "extension"
     ],
     "type": "object"
    },
@@ -1404,6 +1577,26 @@
     "required": [
      "grams",
      "other"
+    ],
+    "type": "object"
+   },
+   "BlockInfo": {
+    "properties": {
+     "seqno": {
+      "description": "Masterchain block sequence number.",
+      "example": 57486221,
+      "format": "uint32",
+      "type": "integer"
+     },
+     "utime": {
+      "example": 23814011000000,
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "seqno",
+     "time"
     ],
     "type": "object"
    },
@@ -1870,7 +2063,7 @@
       "type": "object"
      },
      "14": {
-      "description": "The reward in nanoTons for block creation in the TON blockchain.",
+      "description": "The reward in nanoGram for block creation in the TON blockchain.",
       "properties": {
        "basechain_block_fee": {
         "format": "int64",
@@ -1888,7 +2081,7 @@
       "type": "object"
      },
      "15": {
-      "description": "The reward in nanoTons for block creation in the TON blockchain.",
+      "description": "The reward in nanograms for block creation in the TON blockchain.",
       "properties": {
        "elections_end_before": {
         "example": 8192,
@@ -2213,6 +2406,18 @@
       "format": "address",
       "type": "string"
      },
+     "30": {
+      "description": "The configuration for the new consensus protocol. Each chain can have its own optional configuration.",
+      "properties": {
+       "mc": {
+        "$ref": "#/components/schemas/NewConsensusConfig"
+       },
+       "shard": {
+        "$ref": "#/components/schemas/NewConsensusConfig"
+       }
+      },
+      "type": "object"
+     },
      "31": {
       "description": "The configuration for the consensus protocol above catchain.",
       "properties": {
@@ -2254,7 +2459,7 @@
       "type": "string"
      },
      "40": {
-      "description": "The configuration for punishment for improper behavior (non-validation). In the absence of the parameter, the default fine size is 101 TON",
+      "description": "The configuration for punishment for improper behavior (non-validation). In the absence of the parameter, the default fine size is 101 Gram",
       "properties": {
        "misbehaviour_punishment_config": {
         "$ref": "#/components/schemas/MisbehaviourPunishmentConfig"
@@ -2305,7 +2510,6 @@
         "items": {
          "properties": {
           "code_hash": {
-           "format": "address",
            "type": "string"
           },
           "gas_usage": {
@@ -2516,6 +2720,19 @@
     ],
     "type": "object"
    },
+   "BlockchainLibrary": {
+    "properties": {
+     "boc": {
+      "example": "b5ee9c7201010101005f0000baff0020dd2082014c97ba218201339cbab19c71b0ed44d0d31fd70bffe304e0a4f260810200d71820d70b1fed44d0d31fd3ffd15112baf2a122f901541044f910f2a2f80001d31f3120d74a96d307d402fb00ded1a4c8cb1fcbffc9ed54",
+      "format": "cell",
+      "type": "string"
+     }
+    },
+    "required": [
+     "boc"
+    ],
+    "type": "object"
+   },
    "BlockchainRawAccount": {
     "properties": {
      "address": {
@@ -2540,10 +2757,10 @@
       "type": "string"
      },
      "extra_balance": {
-      "additionalProperties": {
-       "type": "string"
+      "items": {
+       "$ref": "#/components/schemas/ExtraCurrency"
       },
-      "type": "object"
+      "type": "array"
      },
      "frozen_hash": {
       "example": "088b436a846d92281734236967970612f87fbd64a2cd3573107948379e8e4161",
@@ -2595,6 +2812,20 @@
     ],
     "type": "object"
    },
+   "BlockchainRawAccounts": {
+    "properties": {
+     "accounts": {
+      "items": {
+       "$ref": "#/components/schemas/BlockchainRawAccount"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "accounts"
+    ],
+    "type": "object"
+   },
    "BouncePhaseType": {
     "enum": [
      "TrPhaseBounceNegfunds",
@@ -2604,23 +2835,39 @@
     "example": "cskip_no_state",
     "type": "string"
    },
-   "ChartPoints": {
-    "additionalItems": false,
-    "example": [
-     1668436763,
-     97.21323234
-    ],
-    "items": [
-     {
-      "description": "Unix timestamp of the data point",
-      "format": "int64",
-      "type": "integer"
+   "BuyXTRAction": {
+    "properties": {
+     "amount": {
+      "example": "123000000000",
+      "type": "string",
+      "x-js-format": "bigint"
      },
-     {
-      "description": "Decimal price of the token in the requested currency",
-      "type": "number"
+     "recipient": {
+      "$ref": "#/components/schemas/AccountAddress"
      }
+    },
+    "required": [
+     "recipient",
+     "amount"
     ],
+    "type": "object"
+   },
+   "ChartPoints": {
+    "description": "Each inner array is a pair [timestamp, price]:\n  • index 0 — Unix timestamp (int64)  \n  • index 1 — token price (decimal) in the requested currency.\n",
+    "example": [
+     [
+      1668436763,
+      97.21323234
+     ]
+    ],
+    "items": {
+     "items": {
+      "type": "number"
+     },
+     "maxItems": 2,
+     "minItems": 2,
+     "type": "array"
+    },
     "type": "array"
    },
    "ComputePhase": {
@@ -2772,6 +3019,16 @@
      "credit"
     ],
     "type": "object"
+   },
+   "CurrencyType": {
+    "enum": [
+     "native",
+     "extra_currency",
+     "jetton",
+     "fiat"
+    ],
+    "example": "jetton",
+    "type": "string"
    },
    "DecodedMessage": {
     "properties": {
@@ -2945,6 +3202,142 @@
     ],
     "type": "object"
    },
+   "DefiAsset": {
+    "properties": {
+     "amount": {
+      "description": "amount in minimal units of the locked asset",
+      "example": "1000000000",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "asset_address": {
+      "format": "address",
+      "type": "string"
+     },
+     "defi_provider": {
+      "$ref": "#/components/schemas/DefiProvider"
+     },
+     "locked_asset": {
+      "$ref": "#/components/schemas/DefiLockedAsset"
+     },
+     "pool_address": {
+      "format": "address",
+      "type": "string"
+     },
+     "type": {
+      "$ref": "#/components/schemas/DefiAssetType"
+     }
+    },
+    "required": [
+     "type",
+     "amount",
+     "defi_provider",
+     "locked_asset"
+    ],
+    "type": "object"
+   },
+   "DefiAssetType": {
+    "enum": [
+     "staking",
+     "lending_supply",
+     "lending_borrow",
+     "liquid_staking",
+     "liquid_pool",
+     "yield_token"
+    ],
+    "type": "string"
+   },
+   "DefiAssets": {
+    "properties": {
+     "assets": {
+      "items": {
+       "$ref": "#/components/schemas/DefiAsset"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "assets"
+    ],
+    "type": "object"
+   },
+   "DefiLiquidPoolAssets": {
+    "properties": {
+     "asset0": {
+      "$ref": "#/components/schemas/DefiLockedAsset"
+     },
+     "asset1": {
+      "$ref": "#/components/schemas/DefiLockedAsset"
+     }
+    },
+    "required": [
+     "asset0",
+     "asset1"
+    ],
+    "type": "object"
+   },
+   "DefiLockedAsset": {
+    "properties": {
+     "jetton": {
+      "$ref": "#/components/schemas/JettonPreview"
+     },
+     "type": {
+      "description": "native Gram or jetton asset",
+      "enum": [
+       "native",
+       "jetton"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "type"
+    ],
+    "type": "object"
+   },
+   "DefiProvider": {
+    "properties": {
+     "card": {
+      "type": "string"
+     },
+     "description": {
+      "example": "Earn up to 15% yield on your crypto",
+      "type": "string"
+     },
+     "full": {
+      "type": "string"
+     },
+     "icon": {
+      "type": "string"
+     },
+     "link": {
+      "example": "https://lite.morpho.org/tac/earn/",
+      "type": "string"
+     },
+     "miniapp_link": {
+      "example": "https://t.me/MorphoOrgBot",
+      "type": "string"
+     },
+     "name": {
+      "example": "Morpho",
+      "type": "string"
+     },
+     "tag": {
+      "example": "morpho",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "description",
+     "link",
+     "icon",
+     "card",
+     "full",
+     "tag"
+    ],
+    "type": "object"
+   },
    "DepositStakeAction": {
     "description": "validator's participation in elections",
     "properties": {
@@ -2960,6 +3353,10 @@
      "pool": {
       "$ref": "#/components/schemas/AccountAddress"
      },
+     "stake_meta": {
+      "$ref": "#/components/schemas/Price",
+      "description": "If present, should be used instead of amount"
+     },
      "staker": {
       "$ref": "#/components/schemas/AccountAddress"
      }
@@ -2969,6 +3366,41 @@
      "staker",
      "pool",
      "implementation"
+    ],
+    "type": "object"
+   },
+   "DepositTokenStakeAction": {
+    "properties": {
+     "protocol": {
+      "$ref": "#/components/schemas/Protocol"
+     },
+     "stake_meta": {
+      "$ref": "#/components/schemas/Price"
+     },
+     "staker": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "staker",
+     "protocol"
+    ],
+    "type": "object"
+   },
+   "DepositXTRAction": {
+    "properties": {
+     "amount": {
+      "example": "123000000000",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "recipient": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "recipient",
+     "amount"
     ],
     "type": "object"
    },
@@ -3008,8 +3440,11 @@
     "properties": {
      "next_resolver": {
       "example": "0:da6b1b6663a0e4d18cc8574ccd9db5296e367dd9324706f3bbd9eb1cd2caf0bf",
-      "format": "address",
+      "format": "maybe-address",
       "type": "string"
+     },
+     "picture": {
+      "$ref": "#/components/schemas/PictureDNS"
      },
      "sites": {
       "items": {
@@ -3241,8 +3676,13 @@
       "example": "e8b0e3fee4a26bd2317ac1f9952fcdc87dc08fdb617656b5202416323337372e",
       "type": "string"
      },
+     "ext_msg_hash": {
+      "description": "Normalized hash of the root external inbound message (hex).",
+      "example": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+      "type": "string"
+     },
      "in_progress": {
-      "description": "Event is not finished yet. Transactions still happening",
+      "description": "Event trace is not finished yet. Transactions still happening.",
       "example": false,
       "type": "boolean"
      },
@@ -3251,11 +3691,24 @@
       "example": false,
       "type": "boolean"
      },
+     "last_slice_id": {
+      "description": "ID of the slice where this event was finalized. Null if not yet finalized.",
+      "example": 12345678,
+      "format": "int64",
+      "type": "integer"
+     },
      "lt": {
       "example": 25713146000001,
       "format": "int64",
       "type": "integer",
       "x-js-format": "bigint"
+     },
+     "progress": {
+      "example": 0.5,
+      "format": "float",
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
      },
      "timestamp": {
       "example": 1234567890,
@@ -3276,9 +3729,41 @@
      "value_flow",
      "is_scam",
      "lt",
-     "in_progress"
+     "in_progress",
+     "progress"
     ],
     "type": "object"
+   },
+   "ExecGetMethodArg": {
+    "properties": {
+     "type": {
+      "$ref": "#/components/schemas/ExecGetMethodArgType"
+     },
+     "value": {
+      "description": "String representation of the value according to the specified type",
+      "example": "0xfa01d78381ae32",
+      "type": "string"
+     }
+    },
+    "required": [
+     "type",
+     "value"
+    ],
+    "type": "object"
+   },
+   "ExecGetMethodArgType": {
+    "description": "Data type of the argument value:\n- `nan`: Not-a-Number value\n- `null`: Null value\n- `tinyint`: Decimal integer (e.g., `100500`)\n- `int257`: 257-bit integer in hex format with 0x prefix (e.g., `0xfa01d78381ae32`)\n- `slice`: TON blockchain address (e.g., `0:6e731f2e...`)\n- `cell_boc_base64`: Base64-encoded cell BOC (Binary Object Code) (e.g., `te6ccgEBAQEAAgAAAA==`)\n- `slice_boc_hex`: Hex-encoded slice BOC (e.g., `b5ee9c72...`)\n",
+    "enum": [
+     "nan",
+     "null",
+     "tinyint",
+     "int257",
+     "slice",
+     "cell_boc_base64",
+     "slice_boc_hex"
+    ],
+    "example": "int257",
+    "type": "string"
    },
    "ExtraCurrencies": {
     "properties": {
@@ -3341,6 +3826,59 @@
      "recipient",
      "amount",
      "currency"
+    ],
+    "type": "object"
+   },
+   "FlawedJettonTransferAction": {
+    "properties": {
+     "comment": {
+      "example": "Hi! This is your salary. \nFrom accounting with love.",
+      "type": "string"
+     },
+     "encrypted_comment": {
+      "$ref": "#/components/schemas/EncryptedComment"
+     },
+     "jetton": {
+      "$ref": "#/components/schemas/JettonPreview"
+     },
+     "received_amount": {
+      "description": "actually received amount in quanta of tokens",
+      "example": "1000000000",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "recipient": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "recipients_wallet": {
+      "example": "0:E93E7D444180608B8520C00DC664383A387356FB6E16FDDF99DBE5E1415A574B",
+      "format": "address",
+      "type": "string"
+     },
+     "refund": {
+      "$ref": "#/components/schemas/Refund"
+     },
+     "sender": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "senders_wallet": {
+      "example": "0:E93E7D444180608B8520C00DC664383A387356FB6E16FDDF99DBE5E1415A574B",
+      "format": "address",
+      "type": "string"
+     },
+     "sent_amount": {
+      "description": "sent amount in quanta of tokens",
+      "example": "1000000000",
+      "type": "string",
+      "x-js-format": "bigint"
+     }
+    },
+    "required": [
+     "sent_amount",
+     "received_amount",
+     "jetton",
+     "senders_wallet",
+     "recipients_wallet"
     ],
     "type": "object"
    },
@@ -3436,6 +3974,52 @@
     ],
     "type": "object"
    },
+   "GasRelayAction": {
+    "properties": {
+     "amount": {
+      "example": 1000000000,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "is_battery": {
+      "type": "boolean"
+     },
+     "relayer": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "relayer_fee": {
+      "$ref": "#/components/schemas/GasRelayFee"
+     },
+     "target": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "amount",
+     "relayer",
+     "target"
+    ],
+    "type": "object"
+   },
+   "GasRelayFee": {
+    "properties": {
+     "amount": {
+      "description": "amount in quanta of tokens",
+      "example": "1000000000",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "jetton": {
+      "$ref": "#/components/schemas/JettonPreview"
+     }
+    },
+    "required": [
+     "jetton",
+     "amount"
+    ],
+    "type": "object"
+   },
    "GaslessConfig": {
     "properties": {
      "gas_jettons": {
@@ -3464,6 +4048,21 @@
     "required": [
      "gas_jettons",
      "relay_address"
+    ],
+    "type": "object"
+   },
+   "GaslessTx": {
+    "properties": {
+     "external": {
+      "description": "Normalized hash of the external message.",
+      "type": "string"
+     },
+     "protocol_name": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "protocol_name"
     ],
     "type": "object"
    },
@@ -3507,131 +4106,46 @@
     ],
     "type": "object"
    },
-   "InscriptionBalance": {
+   "InsufficientFunds": {
+    "description": "Present on an error when a request failed because the source wallet does not hold enough TON to cover the required gas (error_code 50000).\n",
     "properties": {
-     "balance": {
-      "example": "1000000000",
-      "type": "string",
+     "available": {
+      "description": "TON in nanotons currently available on the source wallet",
+      "format": "int64",
+      "type": "integer",
       "x-js-format": "bigint"
      },
-     "decimals": {
-      "example": 9,
-      "type": "integer"
-     },
-     "ticker": {
-      "example": "nano",
-      "type": "string"
-     },
-     "type": {
-      "enum": [
-       "ton20",
-       "gram20"
-      ],
-      "example": "ton20",
-      "type": "string"
+     "required": {
+      "description": "TON in nanotons required to cover transfer gas",
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
      }
     },
     "required": [
-     "type",
-     "ticker",
-     "balance",
-     "decimals"
+     "required",
+     "available"
     ],
     "type": "object"
    },
-   "InscriptionBalances": {
+   "JettonAssetInfo": {
     "properties": {
-     "inscriptions": {
-      "items": {
-       "$ref": "#/components/schemas/InscriptionBalance"
-      },
-      "type": "array"
-     }
-    },
-    "required": [
-     "inscriptions"
-    ],
-    "type": "object"
-   },
-   "InscriptionMintAction": {
-    "properties": {
-     "amount": {
-      "description": "amount in minimal particles",
-      "example": "123456789",
-      "type": "string",
-      "x-js-format": "bigint"
+     "defi_provider": {
+      "$ref": "#/components/schemas/DefiProvider"
      },
-     "decimals": {
-      "example": 9,
-      "type": "integer"
+     "pool_assets": {
+      "$ref": "#/components/schemas/DefiLiquidPoolAssets"
      },
-     "recipient": {
-      "$ref": "#/components/schemas/AccountAddress"
-     },
-     "ticker": {
-      "example": "nano",
-      "type": "string"
+     "token_type": {
+      "$ref": "#/components/schemas/DefiAssetType"
      },
      "type": {
-      "enum": [
-       "ton20",
-       "gram20"
-      ],
-      "example": "ton20",
-      "type": "string"
+      "$ref": "#/components/schemas/DefiAssetType"
      }
     },
     "required": [
-     "type",
-     "ticker",
-     "recipient",
-     "amount",
-     "decimals"
-    ],
-    "type": "object"
-   },
-   "InscriptionTransferAction": {
-    "properties": {
-     "amount": {
-      "description": "amount in minimal particles",
-      "example": "123456789",
-      "type": "string",
-      "x-js-format": "bigint"
-     },
-     "comment": {
-      "example": "Hi! This is your salary. \nFrom accounting with love.",
-      "type": "string"
-     },
-     "decimals": {
-      "example": 9,
-      "type": "integer"
-     },
-     "recipient": {
-      "$ref": "#/components/schemas/AccountAddress"
-     },
-     "sender": {
-      "$ref": "#/components/schemas/AccountAddress"
-     },
-     "ticker": {
-      "example": "nano",
-      "type": "string"
-     },
-     "type": {
-      "enum": [
-       "ton20",
-       "gram20"
-      ],
-      "example": "ton20",
-      "type": "string"
-     }
-    },
-    "required": [
-     "sender",
-     "recipient",
-     "amount",
-     "type",
-     "ticker",
-     "decimals"
+     "token_type",
+     "defi_provider"
     ],
     "type": "object"
    },
@@ -3641,6 +4155,9 @@
       "example": "597968399",
       "type": "string",
       "x-js-format": "bigint"
+     },
+     "defi_asset": {
+      "$ref": "#/components/schemas/JettonAssetInfo"
      },
      "extensions": {
       "example": [
@@ -3740,7 +4257,13 @@
       "format": "int64",
       "type": "integer"
      },
+     "minter_min_gram_for_storage": {
+      "format": "int64",
+      "type": "integer"
+     },
      "minter_min_tons_for_storage": {
+      "deprecated": true,
+      "description": "this field will gone after Sept. 2026, use wallet_min_gram_for_storage instead",
       "format": "int64",
       "type": "integer"
      },
@@ -3748,7 +4271,13 @@
       "format": "int64",
       "type": "integer"
      },
+     "wallet_min_gram_for_storage": {
+      "format": "int64",
+      "type": "integer"
+     },
      "wallet_min_tons_for_storage": {
+      "deprecated": true,
+      "description": "this field will gone after Sept. 2026, use wallet_min_gram_for_storage instead",
       "format": "int64",
       "type": "integer"
      }
@@ -3756,9 +4285,9 @@
     "required": [
      "bridge_burn_fee",
      "bridge_mint_fee",
-     "wallet_min_tons_for_storage",
+     "wallet_min_gram_for_storage",
      "wallet_gas_consumption",
-     "minter_min_tons_for_storage",
+     "minter_min_gram_for_storage",
      "discover_gas_consumption"
     ],
     "type": "object"
@@ -3838,10 +4367,37 @@
      "admin": {
       "$ref": "#/components/schemas/AccountAddress"
      },
+     "code_hash": {
+      "description": "base64-encoded hash of jetton master code cell",
+      "example": "rOIINk/O5kGub/FI/RARmMN6SY7BLesBSOonmxrz5f4=",
+      "type": "string"
+     },
+     "data_hash": {
+      "description": "base64-encoded hash of jetton master data cell",
+      "example": "xd7cWaRQdVSysuG+WVJv9KRuRUGxnehLoByEcK5ukOE=",
+      "type": "string"
+     },
      "holders_count": {
       "example": 2000,
       "format": "int32",
       "type": "integer"
+     },
+     "interfaces": {
+      "description": "Contract interfaces implemented by the account (e.g. multisig_v2, wallet_v3r2)",
+      "example": [
+       "multisig_v2",
+       "wallet_v3r2"
+      ],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "last_transaction_lt": {
+      "description": "last transaction lt of the jetton master account",
+      "example": "26640202000003",
+      "type": "string",
+      "x-js-format": "bigint"
      },
      "metadata": {
       "$ref": "#/components/schemas/JettonMetadata"
@@ -3850,9 +4406,18 @@
       "example": true,
       "type": "boolean"
      },
+     "name": {
+      "description": "DNS name resolving to this address (e.g. admin.ton)",
+      "example": "admin.ton",
+      "nullable": true,
+      "type": "string"
+     },
      "preview": {
       "example": "https://cache.tonapi.io/images/jetton.jpg",
       "type": "string"
+     },
+     "scaled_ui": {
+      "$ref": "#/components/schemas/ScaledUI"
      },
      "total_supply": {
       "example": "5887105890579978",
@@ -3899,7 +4464,7 @@
       "type": "string"
      },
      "description": {
-      "example": "Wrapped Toncoin",
+      "example": "Wrapped Gram",
       "type": "string"
      },
      "image": {
@@ -3972,6 +4537,89 @@
     ],
     "type": "object"
    },
+   "JettonOperation": {
+    "properties": {
+     "amount": {
+      "example": "1000000000",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "destination": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "jetton": {
+      "$ref": "#/components/schemas/JettonPreview"
+     },
+     "lt": {
+      "example": 25713146000001,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "operation": {
+      "enum": [
+       "transfer",
+       "mint",
+       "burn"
+      ],
+      "example": "transfer",
+      "type": "string"
+     },
+     "payload": {},
+     "query_id": {
+      "example": "17286061481122318000",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "source": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "trace_id": {
+      "example": "8fa19eec7bd6d00d0d76048cebe31e34082a859410c9fcf7d55ef4ff8f7fcb47",
+      "type": "string"
+     },
+     "transaction_hash": {
+      "example": "cbf3e3d70ecf6f69643dd430761cd6004de2cacbdbc3029b0abd30ca3cc1c67e",
+      "type": "string"
+     },
+     "utime": {
+      "example": 1234567890,
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "operation",
+     "utime",
+     "lt",
+     "jetton",
+     "transaction_hash",
+     "amount",
+     "trace_id",
+     "query_id"
+    ],
+    "type": "object"
+   },
+   "JettonOperations": {
+    "properties": {
+     "next_from": {
+      "example": 25713146000001,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "operations": {
+      "items": {
+       "$ref": "#/components/schemas/JettonOperation"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "operations"
+    ],
+    "type": "object"
+   },
    "JettonPreview": {
     "properties": {
      "address": {
@@ -3986,6 +4634,9 @@
       "example": 9,
       "type": "integer"
      },
+     "description": {
+      "type": "string"
+     },
      "image": {
       "example": "https://cache.tonapi.io/images/jetton.jpg",
       "type": "string"
@@ -3993,6 +4644,9 @@
      "name": {
       "example": "Wrapped TON",
       "type": "string"
+     },
+     "scaled_ui": {
+      "$ref": "#/components/schemas/ScaledUI"
      },
      "score": {
       "format": "int32",
@@ -4051,12 +4705,20 @@
       "x-js-format": "bigint"
      },
      "dex": {
-      "enum": [
-       "stonfi",
-       "dedust",
-       "megatonfi"
-      ],
+      "example": "stonfi",
       "type": "string"
+     },
+     "gram_in": {
+      "example": 1000000000,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "gram_out": {
+      "example": 2000000000,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
      },
      "jetton_master_in": {
       "$ref": "#/components/schemas/JettonPreview"
@@ -4068,12 +4730,16 @@
       "$ref": "#/components/schemas/AccountAddress"
      },
      "ton_in": {
+      "deprecated": true,
+      "description": "this field will gone after Sept. 2026, use gram_in instead",
       "example": 1000000000,
       "format": "int64",
       "type": "integer",
       "x-js-format": "bigint"
      },
      "ton_out": {
+      "deprecated": true,
+      "description": "this field will gone after Sept. 2026, use gram_out instead",
       "example": 2000000000,
       "format": "int64",
       "type": "integer",
@@ -4159,6 +4825,7 @@
    "JettonVerificationType": {
     "enum": [
      "whitelist",
+     "graylist",
      "blacklist",
      "none"
     ],
@@ -4189,6 +4856,28 @@
     },
     "required": [
      "balances"
+    ],
+    "type": "object"
+   },
+   "LiquidityDepositAction": {
+    "properties": {
+     "from": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "protocol": {
+      "$ref": "#/components/schemas/Protocol"
+     },
+     "tokens": {
+      "items": {
+       "$ref": "#/components/schemas/VaultDepositInfo"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "protocol",
+     "from",
+     "tokens"
     ],
     "type": "object"
    },
@@ -4325,6 +5014,7 @@
     "type": "object"
    },
    "MessageConsequences": {
+    "description": "Result of emulating a wallet message on the current blockchain state: describes the expected on-chain consequences (trace, high-level AccountEvent, risk) for the signing wallet. For UI display only.\n",
     "properties": {
      "event": {
       "$ref": "#/components/schemas/AccountEvent"
@@ -4340,6 +5030,23 @@
      "trace",
      "risk",
      "event"
+    ],
+    "type": "object"
+   },
+   "Metadata": {
+    "properties": {
+     "decryption_key": {
+      "description": "hex encoded bytes",
+      "example": "dead.....beef",
+      "type": "string"
+     },
+     "encrypted_binary": {
+      "description": "hex encoded bytes",
+      "type": "string"
+     }
+    },
+    "required": [
+     "encrypted_binary"
     ],
     "type": "object"
    },
@@ -4383,6 +5090,230 @@
      "success",
      "exit_code",
      "stack"
+    ],
+    "type": "object"
+   },
+   "MigrationOutMessage": {
+    "properties": {
+     "boc": {
+      "description": "base64 BOC of the internal message cell the wallet resends",
+      "format": "cell-base64",
+      "type": "string"
+     },
+     "mode": {
+      "description": "send-mode byte (e.g. 3 for a transfer, 128 for the final balance sweep)",
+      "format": "int32",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "boc",
+     "mode"
+    ],
+    "type": "object"
+   },
+   "MigrationPrepareConflict": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/MigrationPrepareResponse"
+     },
+     {
+      "properties": {
+       "details": {
+        "$ref": "#/components/schemas/InsufficientFunds"
+       },
+       "error": {
+        "example": "insufficient GRAM for gas",
+        "type": "string"
+       },
+       "error_code": {
+        "description": "same extended code as on a plain error response (50000)",
+        "format": "int64",
+        "type": "integer"
+       }
+      },
+      "required": [
+       "error"
+      ],
+      "type": "object"
+     }
+    ],
+    "description": "The prepared migration together with the reason it cannot be executed as-is. Returned with HTTP 409 and error_code 50000 when the source wallet holds migratable assets but not enough TON to cover the transfer gas: the transactions are the ones the migration would consist of once the source holds `details.required`, so a client can show the full preview next to the shortfall instead of re-requesting prepare after the top-up.\n"
+   },
+   "MigrationPrepareRequest": {
+    "properties": {
+     "currency": {
+      "default": "USD",
+      "description": "fiat currency for the preview values",
+      "example": "USD",
+      "type": "string"
+     },
+     "from": {
+      "description": "legacy source wallet to drain",
+      "format": "address",
+      "type": "string"
+     },
+     "gas_jetton_master": {
+      "description": "Master address of jetton that should be used to cover transactions fees. Must be supported by /v2/gasless/config and held by the source wallet.\n",
+      "format": "address",
+      "type": "string"
+     },
+     "gas_payer": {
+      "default": "self",
+      "description": "Who pays the gas:\n  - `self` — the source wallet pays, as usual\n  - `battery` — asset transfers are sponsored by the Tonkeeper Battery\n  - `gasless` — source wallet pays with jetton, in this case `gas_jetton_master` is required too (only from this list: `/v2/gasless/config`)\n",
+      "enum": [
+       "self",
+       "battery",
+       "gasless"
+      ],
+      "type": "string"
+     },
+     "public_key": {
+      "description": "hex-encoded ed25519 public key of the source wallet. If `from` wallet is uninitialized, then public_key is used to infer wallet code\n",
+      "example": "29c1a72938b8f4f1d4e64f1e3f73e4b0e60f9b0c0e0d0e0f0a0b0c0d0e0f0a0b0",
+      "type": "string"
+     },
+     "to": {
+      "description": "destination wallet TON address",
+      "format": "address",
+      "type": "string"
+     }
+    },
+    "required": [
+     "from",
+     "to"
+    ],
+    "type": "object"
+   },
+   "MigrationPrepareResponse": {
+    "properties": {
+     "from": {
+      "format": "address",
+      "type": "string"
+     },
+     "to": {
+      "format": "address",
+      "type": "string"
+     },
+     "transactions": {
+      "description": "ordered; sign and broadcast in array order, one entry per external message",
+      "items": {
+       "$ref": "#/components/schemas/MigrationTransaction"
+      },
+      "type": "array"
+     },
+     "wallet_version": {
+      "description": "source wallet version (informational)",
+      "example": "v4R2",
+      "type": "string"
+     }
+    },
+    "required": [
+     "from",
+     "to",
+     "wallet_version",
+     "transactions"
+    ],
+    "type": "object"
+   },
+   "MigrationTransaction": {
+    "properties": {
+     "boc": {
+      "description": "base64 BOC of the unsigned wallet body. The body type is determined by (wallet_version, sponsored): for v3/v4 it is always the external body — sign its hash, prepend the signature, wrap in an external message; for w5 with sponsored=false it is the external body with the signature appended as the trailing 512 bits; for w5 with sponsored=true it is the internal_signed body — sign and wrap it for /v2/gasless/send as in the gasless flow.\n",
+      "type": "string"
+     },
+     "commission": {
+      "description": "gasless only; the relay commission in indivisible gas-jetton units, embedded in the boc as a jetton transfer to the relay. Exact for the first transaction; an estimate for later ones (re-running prepare refreshes it).\n",
+      "type": "string"
+     },
+     "emulation": {
+      "$ref": "#/components/schemas/MessageConsequences"
+     },
+     "gas_spent": {
+      "description": "TON burned as network fees by this transaction, in nanotons — the sum over every transaction in `emulation.trace`. For a transfer batch this is only part of the gas attached to its messages: the transfers name the destination wallet as response_destination, so the unburned remainder arrives there instead of returning to the source. For the final balance sweep it is the fee deducted from the swept amount. When `sponsored` is true these fees are covered by the relay, which charges `commission` instead.\n",
+      "example": 4321000,
+      "format": "int64",
+      "type": "integer"
+     },
+     "messages": {
+      "description": "ordered raw internal messages carried by this transaction — the cells the wallet resends. These are what populate the payload/actions.\n",
+      "items": {
+       "$ref": "#/components/schemas/MigrationOutMessage"
+      },
+      "type": "array"
+     },
+     "seqno": {
+      "description": "wallet seqno baked into the unsigned body",
+      "format": "int32",
+      "type": "integer"
+     },
+     "sponsored": {
+      "default": false,
+      "description": "true — the Battery relay pays gas for this transaction; submit it via /v2/gasless/send. false — self-paid; sign and broadcast via /v2/blockchain/message as usual (e.g. the final TON sweep).\n",
+      "type": "boolean"
+     },
+     "state_init": {
+      "description": "base64 BOC of the wallet StateInit (code + data). Present only on the first transaction when the source wallet is not yet initialized\n",
+      "format": "cell-base64",
+      "type": "string"
+     }
+    },
+    "required": [
+     "seqno",
+     "boc",
+     "messages",
+     "emulation",
+     "gas_spent"
+    ],
+    "type": "object"
+   },
+   "MigrationWalletValue": {
+    "properties": {
+     "account": {
+      "example": "0:97264395BD65A255A429B11326C84128B7D70FFED7949ABAE3036D506BA38621",
+      "format": "address",
+      "type": "string"
+     },
+     "balance": {
+      "description": "TON balance in nanotons",
+      "format": "int64",
+      "type": "integer"
+     },
+     "jettons": {
+      "items": {
+       "$ref": "#/components/schemas/JettonBalance"
+      },
+      "type": "array"
+     },
+     "nft_count": {
+      "description": "number of NFTs owned by the account",
+      "format": "int32",
+      "type": "integer"
+     },
+     "status": {
+      "$ref": "#/components/schemas/AccountStatus"
+     }
+    },
+    "required": [
+     "account",
+     "balance",
+     "status",
+     "jettons",
+     "nft_count"
+    ],
+    "type": "object"
+   },
+   "MigrationWallets": {
+    "properties": {
+     "wallets": {
+      "items": {
+       "$ref": "#/components/schemas/MigrationWalletValue"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "wallets"
     ],
     "type": "object"
    },
@@ -4515,9 +5446,7 @@
       "type": "array"
      },
      "seqno": {
-      "example": 1,
-      "format": "int64",
-      "type": "integer"
+      "type": "string"
      },
      "signers": {
       "items": {
@@ -4553,6 +5482,35 @@
       "format": "int32",
       "type": "integer"
      },
+     "changing_parameters": {
+      "properties": {
+       "proposers": {
+        "items": {
+         "format": "address",
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "signers": {
+        "items": {
+         "example": "0:da6b1b6663a0e4d18cc8574ccd9db5296e367dd9324706f3bbd9eb1cd2caf0bf",
+         "format": "address",
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "threshold": {
+        "format": "int32",
+        "type": "integer"
+       }
+      },
+      "required": [
+       "threshold",
+       "signers",
+       "proposers"
+      ],
+      "type": "object"
+     },
      "creation_date": {
       "format": "int64",
       "type": "integer"
@@ -4561,10 +5519,13 @@
       "format": "int64",
       "type": "integer"
      },
+     "multisig_address": {
+      "example": "0:da6b1b6663a0e4d18cc8574ccd9db5296e367dd9324706f3bbd9eb1cd2caf0bf",
+      "format": "address",
+      "type": "string"
+     },
      "order_seqno": {
-      "example": 1,
-      "format": "int64",
-      "type": "integer"
+      "type": "string"
      },
      "risk": {
       "$ref": "#/components/schemas/Risk"
@@ -4604,7 +5565,8 @@
      "expiration_date",
      "risk",
      "creation_date",
-     "signed_by"
+     "signed_by",
+     "multisig_address"
     ],
     "type": "object"
    },
@@ -4619,6 +5581,58 @@
     },
     "required": [
      "multisigs"
+    ],
+    "type": "object"
+   },
+   "NewConsensusConfig": {
+    "properties": {
+     "first_block_timeout_ms": {
+      "example": 1000,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "flags": {
+      "example": 0,
+      "format": "int",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "max_leader_window_desync": {
+      "example": 4,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "noncritical_params": {
+      "additionalProperties": {
+       "format": "int64",
+       "type": "integer",
+       "x-js-format": "bigint"
+      },
+      "type": "object"
+     },
+     "slots_per_leader_window": {
+      "example": 1,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "target_rate_ms": {
+      "example": 1000,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "use_quic": {
+      "example": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "flags",
+     "use_quic",
+     "slots_per_leader_window"
     ],
     "type": "object"
    },
@@ -4648,6 +5662,9 @@
       "example": {},
       "type": "object"
      },
+     "metadata_status": {
+      "$ref": "#/components/schemas/NftCollectionMetadataStatus"
+     },
      "next_item_index": {
       "example": 1,
       "format": "int64",
@@ -4665,14 +5682,39 @@
      "raw_collection_content": {
       "format": "cell",
       "type": "string"
+     },
+     "trust": {
+      "$ref": "#/components/schemas/TrustType"
      }
     },
     "required": [
      "address",
      "next_item_index",
      "raw_collection_content",
-     "approved_by"
+     "approved_by",
+     "trust"
     ],
+    "type": "object"
+   },
+   "NftCollectionMetadataStatus": {
+    "properties": {
+     "is_broken": {
+      "type": "boolean"
+     },
+     "last_refresh_success": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "last_refresh_try": {
+      "format": "int64",
+      "nullable": true,
+      "type": "integer"
+     },
+     "url": {
+      "type": "string"
+     }
+    },
     "type": "object"
    },
    "NftCollections": {
@@ -4697,9 +5739,17 @@
       "type": "string"
      },
      "approved_by": {
-      "$ref": "#/components/schemas/NftApprovedBy",
+      "allOf": [
+       {
+        "$ref": "#/components/schemas/NftApprovedBy"
+       }
+      ],
       "deprecated": true,
-      "description": "please use trust field"
+      "description": "Please use trust field"
+     },
+     "code_hash": {
+      "description": "Hash of the NFT item account code cell (hex)",
+      "type": "string"
      },
      "collection": {
       "properties": {
@@ -4723,6 +5773,10 @@
        "description"
       ],
       "type": "object"
+     },
+     "data_hash": {
+      "description": "Hash of the NFT item account data cell (hex)",
+      "type": "string"
      },
      "dns": {
       "example": "crypto.ton",
@@ -4784,6 +5838,7 @@
      },
      "nft": {
       "example": "",
+      "format": "maybe-address",
       "type": "string"
      },
      "payload": {
@@ -4820,6 +5875,66 @@
     ],
     "type": "object"
    },
+   "NftOperation": {
+    "properties": {
+     "destination": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "item": {
+      "$ref": "#/components/schemas/NftItem"
+     },
+     "lt": {
+      "example": 25713146000001,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "operation": {
+      "example": "transfer",
+      "type": "string"
+     },
+     "source": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "transaction_hash": {
+      "example": "0xdeadbeaf",
+      "type": "string"
+     },
+     "utime": {
+      "example": 1234567890,
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "operation",
+     "utime",
+     "lt",
+     "transaction_hash",
+     "item"
+    ],
+    "type": "object"
+   },
+   "NftOperations": {
+    "properties": {
+     "next_from": {
+      "example": 25713146000001,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "operations": {
+      "items": {
+       "$ref": "#/components/schemas/NftOperation"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "operations"
+    ],
+    "type": "object"
+   },
    "NftPurchaseAction": {
     "properties": {
      "amount": {
@@ -4850,6 +5965,50 @@
      "buyer",
      "auction_type",
      "nft"
+    ],
+    "type": "object"
+   },
+   "NominatorRewardEntry": {
+    "properties": {
+     "address": {
+      "description": "Nominator's wallet address (bounceable, base64url).",
+      "example": "EQAqR4RYauq7p3jqKGnD-eSYVDoOCak9g8ZsSNVHI9fevCzB",
+      "type": "string"
+     },
+     "effective_stake": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "reward": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "stake": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "weight": {
+      "description": "Nominator's share of total nominators' deposit (0–1).",
+      "example": 0.15,
+      "format": "double",
+      "type": "number"
+     }
+    },
+    "required": [
+     "address",
+     "weight",
+     "reward",
+     "effective_stake",
+     "stake"
     ],
     "type": "object"
    },
@@ -4899,10 +6058,76 @@
     ],
     "type": "object"
    },
+   "OraclePriceFeed": {
+    "properties": {
+     "display_symbol": {
+      "example": "GRAM/USD",
+      "type": "string"
+     },
+     "id": {
+      "example": "e62df6c8b4a85fe1a67f1c4d1f1e1d4335c04d1d7e2c50e0d7da7ad911f2d4",
+      "type": "string"
+     },
+     "rate": {
+      "example": 5.24,
+      "format": "double",
+      "type": "number"
+     }
+    },
+    "required": [
+     "id",
+     "display_symbol"
+    ],
+    "type": "object"
+   },
+   "OracleRequestAction": {
+    "properties": {
+     "price_feeds": {
+      "items": {
+       "$ref": "#/components/schemas/OraclePriceFeed"
+      },
+      "type": "array"
+     },
+     "requester": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "response_to": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "requester",
+     "response_to",
+     "price_feeds"
+    ],
+    "type": "object"
+   },
+   "PictureDNS": {
+    "properties": {
+     "bag_id": {
+      "type": "string"
+     },
+     "type": {
+      "enum": [
+       "url",
+       "bag_id"
+      ],
+      "type": "string"
+     },
+     "url": {
+      "description": "WARNING! This is arbitrary url supplied by domain owner, use it very carefully.\nThere is no guarantee that URL resolves to an image file and is not a phishing site.\n",
+      "type": "string"
+     }
+    },
+    "required": [
+     "type"
+    ],
+    "type": "object"
+   },
    "PoolImplementation": {
     "properties": {
      "description": {
-      "example": "Oldest pool with minimal staking amount 50 TON",
+      "example": "Oldest pool with minimal staking amount 50 Gram",
       "type": "string"
      },
      "name": {
@@ -4933,7 +6158,8 @@
     "enum": [
      "whales",
      "tf",
-     "liquidTF"
+     "liquidTF",
+     "ffvault"
     ],
     "type": "string"
    },
@@ -5038,19 +6264,132 @@
    },
    "Price": {
     "properties": {
+     "currency_type": {
+      "$ref": "#/components/schemas/CurrencyType"
+     },
+     "decimals": {
+      "example": 9,
+      "type": "integer"
+     },
+     "image": {
+      "example": "https://cache.tonapi.io/images/jetton.jpg",
+      "type": "string"
+     },
+     "jetton": {
+      "example": "0:0BB5A9F69043EEBDDA5AD2E946EB953242BD8F603FE795D90698CEEC6BFC60A0",
+      "format": "address",
+      "type": "string"
+     },
      "token_name": {
-      "example": "TON",
+      "example": "Gram",
       "type": "string"
      },
      "value": {
       "example": "123000000000",
       "type": "string",
       "x-js-format": "bigint"
+     },
+     "verification": {
+      "$ref": "#/components/schemas/TrustType"
      }
     },
     "required": [
+     "currency_type",
      "value",
-     "token_name"
+     "decimals",
+     "token_name",
+     "verification",
+     "image"
+    ],
+    "type": "object"
+   },
+   "Protocol": {
+    "properties": {
+     "image": {
+      "example": "https://cache.tonapi.io/images/jetton.jpg",
+      "type": "string"
+     },
+     "name": {
+      "example": "Ethena",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name"
+    ],
+    "type": "object"
+   },
+   "Purchase": {
+    "properties": {
+     "amount": {
+      "$ref": "#/components/schemas/Price"
+     },
+     "destination": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "event_id": {
+      "example": "e8b0e3fee4a26bd2317ac1f9952fcdc87dc08fdb617656b5202416323337372e",
+      "type": "string"
+     },
+     "invoice_id": {
+      "example": "03cfc582-b1c3-410a-a9a7-1f3afe326b3b",
+      "type": "string"
+     },
+     "lt": {
+      "example": 25713146000001,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "metadata": {
+      "$ref": "#/components/schemas/Metadata"
+     },
+     "source": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "utime": {
+      "example": 1645544908,
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "event_id",
+     "invoice_id",
+     "source",
+     "destination",
+     "lt",
+     "utime",
+     "amount",
+     "metadata"
+    ],
+    "type": "object"
+   },
+   "PurchaseAction": {
+    "properties": {
+     "amount": {
+      "$ref": "#/components/schemas/Price"
+     },
+     "destination": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
+     "invoice_id": {
+      "example": "03cfc582-b1c3-410a-a9a7-1f3afe326b3b",
+      "type": "string"
+     },
+     "metadata": {
+      "$ref": "#/components/schemas/Metadata"
+     },
+     "source": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "source",
+     "destination",
+     "invoice_id",
+     "amount",
+     "metadata"
     ],
     "type": "object"
    },
@@ -5158,38 +6497,218 @@
     ],
     "type": "object"
    },
-   "Risk": {
-    "description": "Risk specifies assets that could be lost if a message would be sent to a malicious smart contract. It makes sense to understand the risk BEFORE sending a message to the blockchain.",
+   "RemoveExtensionAction": {
     "properties": {
+     "extension": {
+      "example": "0:10C1073837B93FDAAD594284CE8B8EFF7B9CF25427440EB2FC682762E1471365",
+      "format": "address",
+      "type": "string"
+     },
+     "wallet": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "wallet",
+     "extension"
+    ],
+    "type": "object"
+   },
+   "RewardsStats": {
+    "properties": {
+     "apy": {
+      "description": "Time series of APY values as [timestamp_ms, apy] pairs",
+      "items": {
+       "items": {
+        "format": "double",
+        "type": "number"
+       },
+       "type": "array"
+      },
+      "type": "array"
+     },
+     "total_stake": {
+      "description": "Time series of total stake in Gram as [timestamp_ms, stake] pairs",
+      "items": {
+       "items": {
+        "format": "double",
+        "type": "number"
+       },
+       "type": "array"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "apy",
+     "total_stake"
+    ],
+    "type": "object"
+   },
+   "Risk": {
+    "description": "Conservative upper bound on assets this wallet may lose if the emulated message is sent and the counterparty behaves maliciously. Values may exceed current balances (e.g. already-authorized future receipts). For UI display only.\n",
+    "properties": {
+     "gram": {
+      "description": "Maximum Gram amount that may leave the wallet in the worst case, in nanogram.",
+      "example": 500,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
      "jettons": {
+      "description": "Jetton positions that may be debited from the wallet in the worst case.",
       "items": {
        "$ref": "#/components/schemas/JettonQuantity"
       },
       "type": "array"
      },
      "nfts": {
+      "description": "NFT items that may be transferred out of the wallet in the worst case.",
       "items": {
        "$ref": "#/components/schemas/NftItem"
       },
       "type": "array"
      },
      "ton": {
+      "deprecated": true,
+      "description": "this field will gone after Sept. 2026, use gram instead",
       "example": 500,
       "format": "int64",
       "type": "integer",
       "x-js-format": "bigint"
      },
+     "total_equivalent": {
+      "description": "Estimated equivalent of all assets at risk (Gram, jettons, NFTs) in the selected currency from currencyQuery (e.g. USD). Approximate, best-effort UI value.\n",
+      "format": "float",
+      "type": "number"
+     },
      "transfer_all_remaining_balance": {
-      "description": "transfer all the remaining balance of the wallet.",
+      "description": "True if the message semantics allow sweeping all current and future remaining Gram balance of the wallet (e.g. “send all” / drain patterns).\n",
       "example": true,
       "type": "boolean"
      }
     },
     "required": [
      "transfer_all_remaining_balance",
-     "ton",
+     "gram",
      "jettons",
      "nfts"
+    ],
+    "type": "object"
+   },
+   "RoundInfo": {
+    "properties": {
+     "end_block": {
+      "description": "Masterchain block seqno at (or nearest to) validation round end.",
+      "example": 57546000,
+      "format": "uint32",
+      "type": "integer"
+     },
+     "end_utime": {
+      "example": 23814011000000,
+      "format": "int64",
+      "type": "integer"
+     },
+     "start_block": {
+      "description": "Masterchain block seqno at (or nearest to) validation round start.",
+      "example": 57480000,
+      "format": "uint32",
+      "type": "integer"
+     },
+     "start_utime": {
+      "example": 23814011000000,
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "start",
+     "end",
+     "start_block",
+     "end_block"
+    ],
+    "type": "object"
+   },
+   "RoundRewardsResponse": {
+    "properties": {
+     "election_id": {
+      "description": "Election ID (electAt timestamp).",
+      "example": 1740053384,
+      "format": "int64",
+      "type": "integer"
+     },
+     "end_block": {
+      "description": "Last masterchain block of the round.",
+      "format": "uint32",
+      "type": "integer"
+     },
+     "error": {
+      "type": "string"
+     },
+     "next_election_id": {
+      "description": "Election ID of the round immediately after this one.",
+      "example": 1772658824,
+      "format": "int64",
+      "type": "integer"
+     },
+     "prev_election_id": {
+      "description": "Election ID of the round immediately before this one.",
+      "example": 1772486024,
+      "format": "int64",
+      "type": "integer"
+     },
+     "response_time_ms": {
+      "description": "Server-side response time in milliseconds.",
+      "example": 5432,
+      "format": "int64",
+      "type": "integer"
+     },
+     "round_end": {
+      "description": "Validation round end time.",
+      "format": "date-time",
+      "type": "string"
+     },
+     "round_start": {
+      "description": "Validation round start time.",
+      "format": "date-time",
+      "type": "string"
+     },
+     "start_block": {
+      "description": "First masterchain block of the round.",
+      "format": "uint32",
+      "type": "integer"
+     },
+     "total_bonuses": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "total_stake": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "validators": {
+      "items": {
+       "$ref": "#/components/schemas/ValidatorRewardEntry"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "response_time_ms",
+     "election_id",
+     "round_start",
+     "round_end",
+     "start_block",
+     "end_block",
+     "total_bonuses",
+     "total_stake",
+     "validators"
     ],
     "type": "object"
    },
@@ -5214,6 +6733,25 @@
      "address",
      "market",
      "price"
+    ],
+    "type": "object"
+   },
+   "ScaledUI": {
+    "properties": {
+     "denominator": {
+      "example": "597968399",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "numerator": {
+      "example": "597968399",
+      "type": "string",
+      "x-js-format": "bigint"
+     }
+    },
+    "required": [
+     "numerator",
+     "denominator"
     ],
     "type": "object"
    },
@@ -5249,6 +6787,21 @@
      "indexing_latency",
      "rest_online",
      "last_known_masterchain_seqno"
+    ],
+    "type": "object"
+   },
+   "SetSignatureAllowedAction": {
+    "properties": {
+     "allowed": {
+      "type": "boolean"
+     },
+     "wallet": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "wallet",
+     "allowed"
     ],
     "type": "object"
    },
@@ -5288,6 +6841,9 @@
       "type": "string",
       "x-js-format": "bigint"
      },
+     "emulation": {
+      "$ref": "#/components/schemas/MessageConsequences"
+     },
      "from": {
       "example": "0:da6b1b6663a0e4d18cc8574ccd9db5296e367dd9324706f3bbd9eb1cd2caf0bf",
       "format": "address",
@@ -5298,6 +6854,9 @@
        "$ref": "#/components/schemas/SignRawMessage"
       },
       "type": "array"
+     },
+     "protocol_name": {
+      "type": "string"
      },
      "relay_address": {
       "example": "0:da6b1b6663a0e4d18cc8574ccd9db5296e367dd9324706f3bbd9eb1cd2caf0bf",
@@ -5315,7 +6874,8 @@
      "relay_address",
      "commission",
      "from",
-     "valid_until"
+     "valid_until",
+     "protocol_name"
     ],
     "type": "object"
    },
@@ -5380,6 +6940,13 @@
      "executor": {
       "$ref": "#/components/schemas/AccountAddress"
      },
+     "gram_attached": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
      "operation": {
       "example": "NftTransfer or 0x35d95a12",
       "type": "string"
@@ -5391,7 +6958,8 @@
       "$ref": "#/components/schemas/Refund"
      },
      "ton_attached": {
-      "description": "amount in nanotons",
+      "deprecated": true,
+      "description": "amount in nanograms",
       "example": 123456789,
       "format": "int64",
       "type": "integer",
@@ -5401,7 +6969,7 @@
     "required": [
      "executor",
      "contract",
-     "ton_attached",
+     "gram_attached",
      "operation"
     ],
     "type": "object"
@@ -5541,78 +7109,73 @@
     "properties": {
      "address": {
       "example": "0:dea8f638b789172ce36d10a20318125e52c649aa84893cd77858224fe2b9b0ee",
-      "format": "address",
+      "format": "maybe-address",
       "type": "string"
      },
-     "amount": {
-      "example": 1000000000,
-      "format": "int64",
-      "type": "integer"
+     "admin": {
+      "$ref": "#/components/schemas/AccountAddress"
      },
-     "beneficiary_address": {
-      "example": "0:c704dadfabac88eab58e340de03080df81ff76636431f48624ad6e26fb2da0a4",
-      "format": "address",
-      "type": "string"
+     "beneficiary": {
+      "$ref": "#/components/schemas/AccountAddress"
      },
-     "failed_attempts": {
-      "example": 0,
-      "format": "int32",
-      "type": "integer"
+     "metadata": {
+      "$ref": "#/components/schemas/Metadata"
      },
-     "last_payment_time": {
+     "next_charge_at": {
       "example": 1653996834,
       "format": "int64",
       "type": "integer"
      },
-     "last_request_time": {
-      "example": 0,
-      "format": "int64",
-      "type": "integer"
+     "payment_per_period": {
+      "$ref": "#/components/schemas/Price"
      },
      "period": {
+      "description": "payment period in seconds",
       "example": 2592000,
       "format": "int64",
       "type": "integer"
      },
-     "start_time": {
-      "example": 1653996832,
-      "format": "int64",
-      "type": "integer"
+     "status": {
+      "enum": [
+       "not_ready",
+       "active",
+       "suspended",
+       "cancelled"
+      ],
+      "type": "string"
      },
      "subscription_id": {
-      "example": 217477,
-      "format": "int64",
-      "type": "integer"
-     },
-     "timeout": {
-      "example": 10800,
-      "format": "int64",
-      "type": "integer"
-     },
-     "wallet_address": {
-      "example": "0:567DE86AF2B6A557D7085807CF7C26338124987A5179344F0D0FA2657EB710F1",
-      "format": "address",
+      "description": "common identifier",
       "type": "string"
+     },
+     "type": {
+      "description": "type of subscription",
+      "example": "v2",
+      "type": "string"
+     },
+     "wallet": {
+      "$ref": "#/components/schemas/AccountAddress"
      }
     },
     "required": [
-     "address",
-     "wallet_address",
-     "beneficiary_address",
-     "amount",
+     "type",
+     "status",
      "period",
-     "start_time",
-     "timeout",
-     "last_payment_time",
-     "last_request_time",
      "subscription_id",
-     "failed_attempts"
+     "payment_per_period",
+     "wallet",
+     "next_charge_at",
+     "metadata"
     ],
     "type": "object"
    },
    "SubscriptionAction": {
     "properties": {
+     "admin": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
      "amount": {
+      "deprecated": true,
       "example": 1000000000,
       "format": "int64",
       "type": "integer",
@@ -5624,6 +7187,9 @@
      "initial": {
       "example": false,
       "type": "boolean"
+     },
+     "price": {
+      "$ref": "#/components/schemas/Price"
      },
      "subscriber": {
       "$ref": "#/components/schemas/AccountAddress"
@@ -5638,7 +7204,8 @@
      "subscriber",
      "subscription",
      "beneficiary",
-     "amount",
+     "admin",
+     "price",
      "initial"
     ],
     "type": "object"
@@ -5664,7 +7231,7 @@
        "type": "string"
       },
       "example": {
-       "TON": "-1.28%"
+       "GRAM": "-1.28%"
       },
       "type": "object"
      },
@@ -5673,7 +7240,7 @@
        "type": "string"
       },
       "example": {
-       "TON": "-0.56%"
+       "GRAM": "-0.56%"
       },
       "type": "object"
      },
@@ -5682,7 +7249,7 @@
        "type": "string"
       },
       "example": {
-       "TON": "-2.74%"
+       "GRAM": "-2.74%"
       },
       "type": "object"
      },
@@ -5691,7 +7258,7 @@
        "type": "number"
       },
       "example": {
-       "TON": 1.3710752873163712
+       "GRAM": 1.3710752873163712
       },
       "type": "object"
      }
@@ -5701,7 +7268,7 @@
    "TonTransferAction": {
     "properties": {
      "amount": {
-      "description": "amount in nanotons",
+      "description": "amount in nanograms",
       "example": 123456789,
       "format": "int64",
       "type": "integer",
@@ -6000,6 +7567,9 @@
    },
    "UnSubscriptionAction": {
     "properties": {
+     "admin": {
+      "$ref": "#/components/schemas/AccountAddress"
+     },
      "beneficiary": {
       "$ref": "#/components/schemas/AccountAddress"
      },
@@ -6015,7 +7585,100 @@
     "required": [
      "subscriber",
      "subscription",
-     "beneficiary"
+     "beneficiary",
+     "admin"
+    ],
+    "type": "object"
+   },
+   "ValidationRound": {
+    "properties": {
+     "bonuses": {
+      "description": "Total rewards the elector pays for the round. Omitted if round hasn't finished.",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "election_id": {
+      "description": "Election ID (electAt timestamp).",
+      "example": 1740053384,
+      "format": "int64",
+      "type": "integer"
+     },
+     "end_block": {
+      "description": "Masterchain block seqno at (or nearest to) round end. Omitted if round hasn't finished.",
+      "example": 57546000,
+      "format": "uint32",
+      "type": "integer"
+     },
+     "end_utime": {
+      "example": 23814011000000,
+      "format": "int64",
+      "type": "integer"
+     },
+     "finished": {
+      "description": "Whether the validation round is complete.",
+      "example": true,
+      "type": "boolean"
+     },
+     "next_election_id": {
+      "description": "Election ID of the round immediately after this one. Omitted when this round is not yet finished (next round not known).\n",
+      "example": 1772658824,
+      "format": "int64",
+      "type": "integer"
+     },
+     "prev_election_id": {
+      "description": "Election ID of the round immediately before this one.",
+      "example": 1772486024,
+      "format": "int64",
+      "type": "integer"
+     },
+     "start_block": {
+      "description": "Masterchain block seqno at (or nearest to) round start.",
+      "example": 57480000,
+      "format": "uint32",
+      "type": "integer"
+     },
+     "start_utime": {
+      "example": 23814011000000,
+      "format": "int64",
+      "type": "integer"
+     },
+     "total_stake": {
+      "description": "Total stake locked in the round.",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     }
+    },
+    "required": [
+     "election_id",
+     "start",
+     "end",
+     "start_block",
+     "finished"
+    ],
+    "type": "object"
+   },
+   "ValidationRoundsResponse": {
+    "properties": {
+     "response_time_ms": {
+      "description": "Server-side response time in milliseconds.",
+      "example": 1234,
+      "format": "int64",
+      "type": "integer"
+     },
+     "rounds": {
+      "items": {
+       "$ref": "#/components/schemas/ValidationRound"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "response_time_ms",
+     "rounds"
     ],
     "type": "object"
    },
@@ -6047,6 +7710,106 @@
      "adnl_address",
      "stake",
      "max_factor"
+    ],
+    "type": "object"
+   },
+   "ValidatorRewardEntry": {
+    "properties": {
+     "effective_stake": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "nominators": {
+      "items": {
+       "$ref": "#/components/schemas/NominatorRewardEntry"
+      },
+      "type": "array"
+     },
+     "nominators_count": {
+      "format": "uint32",
+      "type": "integer"
+     },
+     "nominators_stake": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "owner_address": {
+      "type": "string"
+     },
+     "pool": {
+      "description": "Pool smart contract address (bounceable, base64url).",
+      "example": "Ef_bmCmMPsrHKOC4hV8foWBs2TEUAggQ1Wfe6EAqjrI3sGNI",
+      "type": "string"
+     },
+     "pool_type": {
+      "description": "Contract type detected by code hash.",
+      "enum": [
+       "nominator-pool-v1.0",
+       "single-nominator-pool-v1.0",
+       "single-nominator-pool-v1.1",
+       "other"
+      ],
+      "type": "string"
+     },
+     "public_key": {
+      "description": "Validator's public key (hex-encoded Ed25519).",
+      "example": "e33f0e53552f951e0a27c8e5a461a1bd65975af369a2c85a06e51f7fbb8ae667",
+      "type": "string"
+     },
+     "rank": {
+      "description": "Position sorted by effective stake (descending).",
+      "example": 1,
+      "type": "integer"
+     },
+     "reward": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "total_stake": {
+      "description": "Total funds deposited by the pool: effective_stake + credit (leftover balance kept in the elector contract after election).\n",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "validator_address": {
+      "type": "string"
+     },
+     "validator_reward_share": {
+      "description": "Fraction of staking rewards kept by the validator (0.3 = 30%).",
+      "example": 0.3,
+      "format": "double",
+      "type": "number"
+     },
+     "validator_stake": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "weight": {
+      "description": "Fraction of total effective stake (0–1).",
+      "example": 0.004648,
+      "format": "double",
+      "type": "number"
+     }
+    },
+    "required": [
+     "rank",
+     "public_key",
+     "effective_stake",
+     "weight",
+     "reward"
     ],
     "type": "object"
    },
@@ -6087,6 +7850,78 @@
      "elect_close",
      "min_stake",
      "total_stake"
+    ],
+    "type": "object"
+   },
+   "ValidatorsResponse": {
+    "properties": {
+     "block": {
+      "$ref": "#/components/schemas/BlockInfo"
+     },
+     "election_id": {
+      "description": "Current election ID (electAt timestamp).",
+      "example": 1740053384,
+      "format": "int64",
+      "type": "integer"
+     },
+     "elector_balance": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "next_election_id": {
+      "description": "Election ID of the round immediately after this one. Omitted when the current round is not yet finished (next round not known).\n",
+      "example": 1772658824,
+      "format": "int64",
+      "type": "integer"
+     },
+     "prev_election_id": {
+      "description": "Election ID of the round immediately before this one.",
+      "example": 1772486024,
+      "format": "int64",
+      "type": "integer"
+     },
+     "response_time_ms": {
+      "description": "Server-side response time in milliseconds.",
+      "example": 12345,
+      "format": "int64",
+      "type": "integer"
+     },
+     "reward_per_block": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "total_stake": {
+      "description": "amount in nanograms",
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "validation_round": {
+      "$ref": "#/components/schemas/RoundInfo"
+     },
+     "validators": {
+      "items": {
+       "$ref": "#/components/schemas/ValidatorRewardEntry"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "response_time_ms",
+     "block",
+     "validation_round",
+     "election_id",
+     "elector_balance",
+     "total_stake",
+     "reward_per_block",
+     "validators"
     ],
     "type": "object"
    },
@@ -6154,6 +7989,12 @@
       "type": "integer",
       "x-js-format": "bigint"
      },
+     "gram": {
+      "example": 80,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
      "jettons": {
       "items": {
        "properties": {
@@ -6187,6 +8028,8 @@
       "type": "array"
      },
      "ton": {
+      "deprecated": true,
+      "description": "this field will gone after Sept. 2026, use gram instead",
       "example": 80,
       "format": "int64",
       "type": "integer",
@@ -6195,8 +8038,109 @@
     },
     "required": [
      "account",
-     "ton",
+     "gram",
      "fees"
+    ],
+    "type": "object"
+   },
+   "VaultDepositInfo": {
+    "properties": {
+     "price": {
+      "$ref": "#/components/schemas/Price"
+     },
+     "vault": {
+      "example": "0:0BB5A9F69043EEBDDA5AD2E946EB953242BD8F603FE795D90698CEEC6BFC60A0",
+      "format": "address",
+      "type": "string"
+     }
+    },
+    "required": [
+     "price",
+     "vault"
+    ],
+    "type": "object"
+   },
+   "Wallet": {
+    "properties": {
+     "address": {
+      "example": "0:da6b1b6663a0e4d18cc8574ccd9db5296e367dd9324706f3bbd9eb1cd2caf0bf",
+      "format": "address",
+      "type": "string"
+     },
+     "balance": {
+      "example": 123456789,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "get_methods": {
+      "deprecated": true,
+      "example": [
+       "get_item_data"
+      ],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "icon": {
+      "example": "https://ton.org/logo.png",
+      "type": "string"
+     },
+     "interfaces": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "is_suspended": {
+      "type": "boolean"
+     },
+     "is_wallet": {
+      "type": "boolean"
+     },
+     "last_activity": {
+      "description": "unix timestamp",
+      "example": 1720860269,
+      "format": "int64",
+      "type": "integer"
+     },
+     "last_lt": {
+      "example": 25713146000001,
+      "format": "int64",
+      "type": "integer",
+      "x-js-format": "bigint"
+     },
+     "name": {
+      "example": "Ton foundation",
+      "type": "string"
+     },
+     "plugins": {
+      "items": {
+       "$ref": "#/components/schemas/WalletPlugin"
+      },
+      "type": "array"
+     },
+     "signature_disabled": {
+      "type": "boolean"
+     },
+     "stats": {
+      "$ref": "#/components/schemas/WalletStats"
+     },
+     "status": {
+      "$ref": "#/components/schemas/AccountStatus"
+     }
+    },
+    "required": [
+     "address",
+     "balance",
+     "stats",
+     "plugins",
+     "status",
+     "last_activity",
+     "get_methods",
+     "is_wallet",
+     "last_lt"
     ],
     "type": "object"
    },
@@ -6237,6 +8181,108 @@
      "has_method_seqno",
      "names",
      "account"
+    ],
+    "type": "object"
+   },
+   "WalletPlugin": {
+    "properties": {
+     "address": {
+      "example": "0:da6b1b6663a0e4d18cc8574ccd9db5296e367dd9324706f3bbd9eb1cd2caf0bf",
+      "format": "address",
+      "type": "string"
+     },
+     "status": {
+      "$ref": "#/components/schemas/AccountStatus"
+     },
+     "type": {
+      "example": "subscription_v1",
+      "type": "string"
+     }
+    },
+    "required": [
+     "address",
+     "type",
+     "status"
+    ],
+    "type": "object"
+   },
+   "WalletStats": {
+    "properties": {
+     "jettons_count": {
+      "example": 123456789,
+      "format": "int32",
+      "type": "integer"
+     },
+     "multisig_count": {
+      "example": 123456789,
+      "format": "int32",
+      "type": "integer"
+     },
+     "nfts_count": {
+      "example": 123456789,
+      "format": "int32",
+      "type": "integer"
+     },
+     "staking_count": {
+      "example": 123456789,
+      "format": "int32",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "nfts_count",
+     "jettons_count",
+     "multisig_count",
+     "staking_count"
+    ],
+    "type": "object"
+   },
+   "Wallets": {
+    "properties": {
+     "accounts": {
+      "items": {
+       "$ref": "#/components/schemas/Wallet"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "accounts"
+    ],
+    "type": "object"
+   },
+   "WalletsByPublicKey": {
+    "properties": {
+     "public_key": {
+      "description": "hex-encoded ed25519 public key",
+      "example": "d8519b83d5b04b17a706ef6d04f3566422be47c2b676b0823235d67b1ef4b1b2",
+      "type": "string"
+     },
+     "wallets": {
+      "items": {
+       "$ref": "#/components/schemas/Wallet"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "public_key",
+     "wallets"
+    ],
+    "type": "object"
+   },
+   "WalletsByPublicKeys": {
+    "properties": {
+     "items": {
+      "description": "Wallets grouped by the originating public key",
+      "items": {
+       "$ref": "#/components/schemas/WalletsByPublicKey"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "items"
     ],
     "type": "object"
    },
@@ -6282,6 +8328,10 @@
      "pool": {
       "$ref": "#/components/schemas/AccountAddress"
      },
+     "stake_meta": {
+      "$ref": "#/components/schemas/Price",
+      "description": "If present, should be used instead of amount"
+     },
      "staker": {
       "$ref": "#/components/schemas/AccountAddress"
      }
@@ -6290,6 +8340,41 @@
      "staker",
      "pool",
      "implementation"
+    ],
+    "type": "object"
+   },
+   "WithdrawTokenStakeRequestAction": {
+    "properties": {
+     "protocol": {
+      "$ref": "#/components/schemas/Protocol"
+     },
+     "stake_meta": {
+      "$ref": "#/components/schemas/Price"
+     },
+     "staker": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "staker",
+     "protocol"
+    ],
+    "type": "object"
+   },
+   "WithdrawXTRAction": {
+    "properties": {
+     "amount": {
+      "example": "123000000000",
+      "type": "string",
+      "x-js-format": "bigint"
+     },
+     "user": {
+      "$ref": "#/components/schemas/AccountAddress"
+     }
+    },
+    "required": [
+     "user",
+     "amount"
     ],
     "type": "object"
    },
@@ -6378,7 +8463,7 @@
   "title": "REST api to TON blockchain explorer",
   "version": "2.0.0"
  },
- "openapi": "3.1.0",
+ "openapi": "3.0.0",
  "paths": {
   "/v2/accounts/_bulk": {
    "post": {
@@ -6467,6 +8552,35 @@
        }
       },
       "description": "account"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Accounts"
+    ]
+   }
+  },
+  "/v2/accounts/{account_id}/defi/assets": {
+   "get": {
+    "description": "Return DeFi assets locked in custom smart contracts: currently returns TON Whales staking and EVAA lending positions.\n",
+    "operationId": "getAccountDefiAssets",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/accountIDParameter"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DefiAssets"
+        }
+       }
+      },
+      "description": "account's DeFi assets"
      },
      "default": {
       "$ref": "#/components/responses/Error"
@@ -6626,6 +8740,18 @@
      {
       "description": "omit this parameter to get last events",
       "in": "query",
+      "name": "after_lt",
+      "required": false,
+      "schema": {
+       "example": 25758317000002,
+       "format": "int64",
+       "type": "integer",
+       "x-js-format": "bigint"
+      }
+     },
+     {
+      "description": "omit this parameter to get last events",
+      "in": "query",
       "name": "before_lt",
       "required": false,
       "schema": {
@@ -6667,6 +8793,19 @@
        "maximum": 2114380800,
        "type": "integer"
       }
+     },
+     {
+      "in": "query",
+      "name": "sort_order",
+      "schema": {
+       "default": "desc",
+       "description": "used to sort the result-set in ascending or descending order by lt.",
+       "enum": [
+        "desc",
+        "asc"
+       ],
+       "type": "string"
+      }
      }
     ],
     "responses": {
@@ -6691,7 +8830,7 @@
   },
   "/v2/accounts/{account_id}/events/emulate": {
    "post": {
-    "description": "Emulate sending message to blockchain",
+    "description": "Emulate sending message to retrieve account-specific events",
     "operationId": "emulateMessageToAccountEvent",
     "parameters": [
      {
@@ -6871,6 +9010,12 @@
      },
      {
       "$ref": "#/components/parameters/supportedExtensions"
+     },
+     {
+      "$ref": "#/components/parameters/limitQuery"
+     },
+     {
+      "$ref": "#/components/parameters/offsetQuery"
      }
     ],
     "responses": {
@@ -6902,9 +9047,6 @@
       "$ref": "#/components/parameters/accountIDParameter"
      },
      {
-      "$ref": "#/components/parameters/i18n"
-     },
-     {
       "description": "omit this parameter to get last events",
       "in": "query",
       "name": "before_lt",
@@ -6926,28 +9068,6 @@
        "minimum": 1,
        "type": "integer"
       }
-     },
-     {
-      "in": "query",
-      "name": "start_date",
-      "required": false,
-      "schema": {
-       "example": 1668436763,
-       "format": "int64",
-       "maximum": 2114380800,
-       "type": "integer"
-      }
-     },
-     {
-      "in": "query",
-      "name": "end_date",
-      "required": false,
-      "schema": {
-       "example": 1668436763,
-       "format": "int64",
-       "maximum": 2114380800,
-       "type": "integer"
-      }
      }
     ],
     "responses": {
@@ -6955,7 +9075,7 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/AccountEvents"
+         "$ref": "#/components/schemas/JettonOperations"
         }
        }
       },
@@ -7010,7 +9130,8 @@
   },
   "/v2/accounts/{account_id}/jettons/{jetton_id}/history": {
    "get": {
-    "description": "Get the transfer jetton history for account and jetton",
+    "deprecated": true,
+    "description": "Please use `getJettonAccountHistoryByID`` instead",
     "operationId": "getAccountJettonHistoryByID",
     "parameters": [
      {
@@ -7135,7 +9256,7 @@
       "$ref": "#/components/parameters/offsetQuery"
      },
      {
-      "description": "Selling nft items in ton implemented usually via transfer items to special selling account. This option enables including items which owned not directly.",
+      "description": "Selling nft items in TON implemented usually via transfer items to special selling account. This option enables including items which owned not directly.",
       "in": "query",
       "name": "indirect_ownership",
       "required": false,
@@ -7198,28 +9319,6 @@
        "minimum": 1,
        "type": "integer"
       }
-     },
-     {
-      "in": "query",
-      "name": "start_date",
-      "required": false,
-      "schema": {
-       "example": 1668436763,
-       "format": "int64",
-       "maximum": 2114380800,
-       "type": "integer"
-      }
-     },
-     {
-      "in": "query",
-      "name": "end_date",
-      "required": false,
-      "schema": {
-       "example": 1668436763,
-       "format": "int64",
-       "maximum": 2114380800,
-       "type": "integer"
-      }
      }
     ],
     "responses": {
@@ -7227,7 +9326,7 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/AccountEvents"
+         "$ref": "#/components/schemas/NftOperations"
         }
        }
       },
@@ -7239,8 +9338,7 @@
     },
     "tags": [
      "NFT"
-    ],
-    "x-question": "duplicate of getNftHistoryByID ?"
+    ]
    }
   },
   "/v2/accounts/{account_id}/publickey": {
@@ -7463,6 +9561,33 @@
     ]
    }
   },
+  "/v2/blockchain/accounts/_bulk": {
+   "post": {
+    "description": "Get low-level information about several accounts taken directly from the blockchain.",
+    "operationId": "getBlockchainRawAccounts",
+    "requestBody": {
+     "$ref": "#/components/requestBodies/AccountIDs"
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BlockchainRawAccounts"
+        }
+       }
+      },
+      "description": "a list of raw accounts"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Blockchain"
+    ]
+   }
+  },
   "/v2/blockchain/accounts/{account_id}": {
    "get": {
     "description": "Get low-level information about an account taken directly from the blockchain.",
@@ -7537,7 +9662,7 @@
       "name": "args",
       "required": false,
       "schema": {
-       "description": "Supported values:\n\"NaN\" for NaN type, \n\"Null\" for Null type, \n10-base digits for tiny int type (Example: 100500), \n0x-prefixed hex digits for int257 (Example: 0xfa01d78381ae32), \nall forms of addresses for slice type (Example: 0:6e731f2e28b73539a7f85ac47ca104d5840b229351189977bb6151d36b5e3f5e), \nsingle-root base64-encoded BOC for cell (Example: \"te6ccgEBAQEAAgAAAA==\"),\nsingle-root hex-encoded BOC for slice (Example: b5ee9c72010101010002000000)",
+       "description": "Array of method arguments in string format. Supported value formats:\n- \"NaN\" for Not-a-Number type\n- \"Null\" for Null type\n- Decimal integers for tinyint type (e.g., \"100500\")\n- 0x-prefixed hex strings for int257 type (e.g., \"0xfa01d78381ae32\")\n- TON blockchain addresses for slice type (e.g., \"0:6e731f2e28b73539a7f85ac47ca104d5840b229351189977bb6151d36b5e3f5e\")\n- Base64-encoded BOC for cell type (e.g., \"te6ccgEBAQEAAgAAAA==\")\n- Hex-encoded BOC for slice type (e.g., \"b5ee9c72010101010002000000\")",
        "example": [
         "0:9a33970f617bcd71acf2cd28357c067aa31859c02820d8f01d74c88063a8f4d8"
        ],
@@ -7546,18 +9671,41 @@
        },
        "type": "array"
       }
-     },
-     {
-      "in": "query",
-      "name": "fix_order",
-      "required": false,
-      "schema": {
-       "default": true,
-       "description": "A temporary fix to switch to a scheme with direct ordering of arguments. \nIf equal to false, then the method takes arguments in direct order,\ne.g. for get_nft_content(int index, cell individual_content) we pass a list of arguments [index, individual_content].\nIf equal to true, then the method takes arguments in reverse order, e.g. [individual_content, index].",
-       "type": "boolean"
-      }
      }
     ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MethodExecutionResult"
+        }
+       }
+      },
+      "description": "method execution result"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Blockchain"
+    ]
+   },
+   "post": {
+    "description": "Execute get method for account",
+    "operationId": "execGetMethodWithBodyForBlockchainAccount",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/accountIDParameter"
+     },
+     {
+      "$ref": "#/components/parameters/methodNameParameter"
+     }
+    ],
+    "requestBody": {
+     "$ref": "#/components/requestBodies/ExecGetMethodArgs"
+    },
     "responses": {
      "200": {
       "content": {
@@ -7683,6 +9831,44 @@
     ]
    }
   },
+  "/v2/blockchain/blocks/{block_id}/boc": {
+   "get": {
+    "description": "Download blockchain block BOC",
+    "operationId": "downloadBlockchainBlockBoc",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/blockchainBlockIDParameter"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "format": "binary",
+         "type": "string"
+        }
+       }
+      },
+      "description": "Block BOC file",
+      "headers": {
+       "Content-Disposition": {
+        "schema": {
+         "example": "attachment; filename=\"block.boc\"",
+         "type": "string"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Blockchain"
+    ]
+   }
+  },
   "/v2/blockchain/blocks/{block_id}/transactions": {
    "get": {
     "description": "Get transactions from block",
@@ -7750,6 +9936,35 @@
        }
       },
       "description": "blockchain config"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Blockchain"
+    ]
+   }
+  },
+  "/v2/blockchain/libraries/{hash}": {
+   "get": {
+    "description": "Get library cell",
+    "operationId": "getLibraryByHash",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/hashParameter"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BlockchainLibrary"
+        }
+       }
+      },
+      "description": "library cell"
      },
      "default": {
       "$ref": "#/components/responses/Error"
@@ -7907,6 +10122,19 @@
     "parameters": [
      {
       "$ref": "#/components/parameters/masterchainSeqno"
+     },
+     {
+      "$ref": "#/components/parameters/offsetQuery"
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "example": 100,
+       "minimum": 1,
+       "type": "integer"
+      }
      }
     ],
     "responses": {
@@ -8157,6 +10385,15 @@
     "parameters": [
      {
       "$ref": "#/components/parameters/domainNameParameter"
+     },
+     {
+      "in": "query",
+      "name": "filter",
+      "required": false,
+      "schema": {
+       "default": false,
+       "type": "boolean"
+      }
      }
     ],
     "responses": {
@@ -8181,7 +10418,7 @@
   },
   "/v2/events/emulate": {
    "post": {
-    "description": "Emulate sending message to blockchain",
+    "description": "Emulate sending message to retrieve general blockchain events",
     "operationId": "emulateMessageToEvent",
     "parameters": [
      {
@@ -8284,271 +10521,6 @@
     ]
    }
   },
-  "/v2/experimental/accounts/{account_id}/inscriptions": {
-   "get": {
-    "description": "Get all inscriptions by owner address. It's experimental API and can be dropped in the future.",
-    "operationId": "getAccountInscriptions",
-    "parameters": [
-     {
-      "$ref": "#/components/parameters/accountIDParameter"
-     },
-     {
-      "$ref": "#/components/parameters/limitQuery"
-     },
-     {
-      "$ref": "#/components/parameters/offsetQuery"
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/InscriptionBalances"
-        }
-       }
-      },
-      "description": "account inscriptions"
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    },
-    "tags": [
-     "Inscriptions"
-    ]
-   }
-  },
-  "/v2/experimental/accounts/{account_id}/inscriptions/history": {
-   "get": {
-    "description": "Get the transfer inscriptions history for account. It's experimental API and can be dropped in the future.",
-    "operationId": "getAccountInscriptionsHistory",
-    "parameters": [
-     {
-      "$ref": "#/components/parameters/accountIDParameter"
-     },
-     {
-      "$ref": "#/components/parameters/i18n"
-     },
-     {
-      "description": "omit this parameter to get last events",
-      "in": "query",
-      "name": "before_lt",
-      "required": false,
-      "schema": {
-       "example": 25758317000002,
-       "format": "int64",
-       "type": "integer",
-       "x-js-format": "bigint"
-      }
-     },
-     {
-      "in": "query",
-      "name": "limit",
-      "required": false,
-      "schema": {
-       "default": 100,
-       "example": 100,
-       "maximum": 1000,
-       "minimum": 1,
-       "type": "integer"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/AccountEvents"
-        }
-       }
-      },
-      "description": "account inscriptions history"
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    },
-    "tags": [
-     "Inscriptions"
-    ]
-   }
-  },
-  "/v2/experimental/accounts/{account_id}/inscriptions/{ticker}/history": {
-   "get": {
-    "description": "Get the transfer inscriptions history for account. It's experimental API and can be dropped in the future.",
-    "operationId": "getAccountInscriptionsHistoryByTicker",
-    "parameters": [
-     {
-      "$ref": "#/components/parameters/accountIDParameter"
-     },
-     {
-      "$ref": "#/components/parameters/i18n"
-     },
-     {
-      "in": "path",
-      "name": "ticker",
-      "required": true,
-      "schema": {
-       "example": "nano",
-       "type": "string"
-      }
-     },
-     {
-      "description": "omit this parameter to get last events",
-      "in": "query",
-      "name": "before_lt",
-      "required": false,
-      "schema": {
-       "example": 25758317000002,
-       "format": "int64",
-       "type": "integer",
-       "x-js-format": "bigint"
-      }
-     },
-     {
-      "in": "query",
-      "name": "limit",
-      "required": false,
-      "schema": {
-       "default": 100,
-       "example": 100,
-       "maximum": 1000,
-       "minimum": 1,
-       "type": "integer"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/AccountEvents"
-        }
-       }
-      },
-      "description": "account inscriptions history"
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    },
-    "tags": [
-     "Inscriptions"
-    ]
-   }
-  },
-  "/v2/experimental/inscriptions/op-template": {
-   "get": {
-    "description": "return comment for making operation with inscription. please don't use it if you don't know what you are doing",
-    "operationId": "getInscriptionOpTemplate",
-    "parameters": [
-     {
-      "in": "query",
-      "name": "type",
-      "required": true,
-      "schema": {
-       "enum": [
-        "ton20",
-        "gram20"
-       ],
-       "example": "ton20",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "destination",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "comment",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "operation",
-      "required": true,
-      "schema": {
-       "enum": [
-        "transfer"
-       ],
-       "example": "transfer",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "amount",
-      "required": true,
-      "schema": {
-       "example": "1000000000",
-       "type": "string",
-       "x-js-format": "bigint"
-      }
-     },
-     {
-      "in": "query",
-      "name": "ticker",
-      "required": true,
-      "schema": {
-       "example": "nano",
-       "type": "string"
-      }
-     },
-     {
-      "in": "query",
-      "name": "who",
-      "required": true,
-      "schema": {
-       "example": "UQAs87W4yJHlF8mt29ocA4agnMrLsOP69jC1HPyBUjJay7Mg",
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {
-         "properties": {
-          "comment": {
-           "example": "comment",
-           "type": "string"
-          },
-          "destination": {
-           "example": "0:0000000000000",
-           "type": "string"
-          }
-         },
-         "required": [
-          "comment",
-          "destination"
-         ],
-         "type": "object"
-        }
-       }
-      },
-      "description": "inscription op template"
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    },
-    "tags": [
-     "Inscriptions"
-    ]
-   }
-  },
   "/v2/extra-currency/{id}": {
    "get": {
     "description": "Get extra currency info by id",
@@ -8608,6 +10580,9 @@
     "operationId": "gaslessEstimate",
     "parameters": [
      {
+      "$ref": "#/components/parameters/i18n"
+     },
+     {
       "description": "jetton to pay commission",
       "in": "path",
       "name": "master_id",
@@ -8651,6 +10626,13 @@
     },
     "responses": {
      "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/GaslessTx"
+        }
+       }
+      },
       "description": "the message has been sent"
      },
      "default": {
@@ -8680,6 +10662,7 @@
       }
      },
      {
+      "description": "Deprecated: pagination is based on a daily snapshot, so some new jettons may not appear yet. Use `last_account_id` for real-time pagination instead.",
       "in": "query",
       "name": "offset",
       "schema": {
@@ -8688,6 +10671,16 @@
        "format": "int32",
        "minimum": 0,
        "type": "integer"
+      }
+     },
+     {
+      "description": "Cursor for pagination, always resolved live. Pass the `metadata.address` of the last jetton master from the previous page to get the next page. Preferred over `offset`.",
+      "in": "query",
+      "name": "last_account_id",
+      "schema": {
+       "example": "0:97264395BD65A255A429B11326C84128B7D70FFED7949ABAE3036D506BA38621",
+       "format": "address",
+       "type": "string"
       }
      }
     ],
@@ -8779,7 +10772,40 @@
       "$ref": "#/components/parameters/limitQuery"
      },
      {
-      "$ref": "#/components/parameters/offsetQuery"
+      "description": "used only with sort_by=balance; has limit of 9000 rows",
+      "in": "query",
+      "name": "offset",
+      "required": false,
+      "schema": {
+       "default": 0,
+       "minimum": 0,
+       "type": "integer"
+      }
+     },
+     {
+      "in": "query",
+      "name": "sort_by",
+      "required": false,
+      "schema": {
+       "default": "balance",
+       "description": "address allows unlimited pagination via last_account_id cursor, balance sorting allow getting top holders",
+       "enum": [
+        "balance",
+        "address"
+       ],
+       "type": "string"
+      }
+     },
+     {
+      "description": "used only with sort_by=address: the account_id of the last holder from the previous page, to fetch the next page after it",
+      "in": "query",
+      "name": "last_account_id",
+      "required": false,
+      "schema": {
+       "example": "0:97264395BD65A255A429B11326C84128B7D70FFED7949ABAE3036D506BA38621",
+       "format": "address",
+       "type": "string"
+      }
      }
     ],
     "responses": {
@@ -8799,6 +10825,83 @@
     },
     "tags": [
      "Jettons"
+    ]
+   }
+  },
+  "/v2/jettons/{jetton_id}/accounts/{account_id}/history": {
+   "get": {
+    "description": "Get the transfer jetton history for account and jetton",
+    "operationId": "getJettonAccountHistoryByID",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/accountIDParameter"
+     },
+     {
+      "$ref": "#/components/parameters/jettonIDParameter"
+     },
+     {
+      "description": "omit this parameter to get last events",
+      "in": "query",
+      "name": "before_lt",
+      "required": false,
+      "schema": {
+       "example": 25758317000002,
+       "format": "int64",
+       "type": "integer",
+       "x-js-format": "bigint"
+      }
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": true,
+      "schema": {
+       "example": 100,
+       "maximum": 1000,
+       "minimum": 1,
+       "type": "integer"
+      }
+     },
+     {
+      "in": "query",
+      "name": "start_date",
+      "required": false,
+      "schema": {
+       "example": 1668436763,
+       "format": "int64",
+       "maximum": 2114380800,
+       "type": "integer"
+      }
+     },
+     {
+      "in": "query",
+      "name": "end_date",
+      "required": false,
+      "schema": {
+       "example": 1668436763,
+       "format": "int64",
+       "maximum": 2114380800,
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/JettonOperations"
+        }
+       }
+      },
+      "description": "account jetton history"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Accounts"
     ]
    }
   },
@@ -9844,6 +11947,111 @@
     ]
    }
   },
+  "/v2/migration/prepare": {
+   "post": {
+    "description": "Prepare ordered signable transactions that migrate every asset from `from` to `to`.",
+    "operationId": "prepareMigration",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/MigrationPrepareRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MigrationPrepareResponse"
+        }
+       }
+      },
+      "description": "ordered transactions to sign and broadcast"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MigrationPrepareConflict"
+        }
+       }
+      },
+      "description": "the migration is prepared but not executable as-is — see `error_code`\n"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Migration"
+    ]
+   }
+  },
+  "/v2/migration/wallets": {
+   "post": {
+    "description": "Get migratable assets value (TON balance, jettons with prices, NFT count) for several wallets at once.",
+    "operationId": "getMigrationWallets",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/currenciesQuery"
+     }
+    ],
+    "requestBody": {
+     "$ref": "#/components/requestBodies/AccountIDs"
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MigrationWallets"
+        }
+       }
+      },
+      "description": "migratable value per requested wallet"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Migration"
+    ]
+   }
+  },
+  "/v2/multisig/order/{account_id}": {
+   "get": {
+    "description": "Get multisig order",
+    "operationId": "getMultisigOrder",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/accountIDParameter"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/MultisigOrder"
+        }
+       }
+      },
+      "description": "multisig order"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Multisig"
+    ]
+   }
+  },
   "/v2/multisig/{account_id}": {
    "get": {
     "description": "Get multisig account info",
@@ -10071,7 +12279,8 @@
   },
   "/v2/nfts/{account_id}/history": {
    "get": {
-    "description": "Get the transfer nfts history for account",
+    "deprecated": true,
+    "description": "Please use `getAccountNftHistory`` instead",
     "operationId": "getNftHistoryByID",
     "parameters": [
      {
@@ -10156,7 +12365,8 @@
        "application/json": {
         "schema": {}
        }
-      }
+      },
+      "description": "openapi.json"
      },
      "default": {
       "$ref": "#/components/responses/Error"
@@ -10180,7 +12390,8 @@
          "type": "string"
         }
        }
-      }
+      },
+      "description": "openapi.yml"
      },
      "default": {
       "$ref": "#/components/responses/Error"
@@ -10188,6 +12399,33 @@
     },
     "tags": [
      "Utilities"
+    ]
+   }
+  },
+  "/v2/pubkeys/wallets/_bulk": {
+   "post": {
+    "description": "Get wallets by a list of public keys",
+    "operationId": "getWalletsByPublicKeyBulk",
+    "requestBody": {
+     "$ref": "#/components/requestBodies/PublicKeys"
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/WalletsByPublicKeys"
+        }
+       }
+      },
+      "description": "grouped wallets per public key"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Wallet"
     ]
    }
   },
@@ -10205,7 +12443,7 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Accounts"
+         "$ref": "#/components/schemas/Wallets"
         }
        }
       },
@@ -10220,22 +12458,76 @@
     ]
    }
   },
+  "/v2/purchases/{account_id}/history": {
+   "get": {
+    "description": "Get history of purchases",
+    "operationId": "getPurchaseHistory",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/accountIDParameter"
+     },
+     {
+      "description": "omit this parameter to get last invoices",
+      "in": "query",
+      "name": "before_lt",
+      "required": false,
+      "schema": {
+       "example": 25758317000002,
+       "format": "int64",
+       "type": "integer",
+       "x-js-format": "bigint"
+      }
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "default": 100,
+       "example": 100,
+       "maximum": 1000,
+       "minimum": 1,
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AccountPurchases"
+        }
+       }
+      },
+      "description": "account purchase history"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
+     "Purchases"
+    ]
+   }
+  },
   "/v2/rates": {
    "get": {
     "description": "Get the token price in the chosen currency for display only. Don’t use this for financial transactions.",
     "operationId": "getRates",
     "parameters": [
      {
-      "description": "accept ton and jetton master addresses, separated by commas",
+      "description": "accept gram and jetton master addresses, separated by commas",
       "explode": false,
       "in": "query",
       "name": "tokens",
       "required": true,
       "schema": {
        "example": [
-        "ton"
+        "gram"
        ],
        "items": {
+        "format": "address",
         "type": "string"
        },
        "maxItems": 100,
@@ -10243,14 +12535,14 @@
       }
      },
      {
-      "description": "accept ton and all possible fiat currencies, separated by commas",
+      "description": "accept gram and all possible fiat currencies, separated by commas",
       "explode": false,
       "in": "query",
       "name": "currencies",
       "required": true,
       "schema": {
        "example": [
-        "ton",
+        "gram",
         "usd",
         "rub"
        ],
@@ -10359,10 +12651,7 @@
         "schema": {
          "properties": {
           "points": {
-           "items": {
-            "$ref": "#/components/schemas/ChartPoints"
-           },
-           "type": "array"
+           "$ref": "#/components/schemas/ChartPoints"
           }
          },
          "required": [
@@ -10385,7 +12674,7 @@
   },
   "/v2/rates/markets": {
    "get": {
-    "description": "Get the TON price from markets",
+    "description": "Get the Gram price from markets",
     "operationId": "getMarketsRates",
     "responses": {
      "200": {
@@ -10415,6 +12704,239 @@
     },
     "tags": [
      "Rates"
+    ]
+   }
+  },
+  "/v2/rewards/apy": {
+   "get": {
+    "description": "Returns the current TON blockchain APY as a percent based on the latest completed validation round.",
+    "operationId": "getRewardsApy",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "example": 3.3,
+         "format": "double",
+         "type": "number"
+        }
+       }
+      },
+      "description": "current TON blockchain APY as a percent"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "summary": "Get current TON blockchain APY",
+    "tags": [
+     "Rewards"
+    ]
+   }
+  },
+  "/v2/rewards/round-rewards": {
+   "get": {
+    "description": "Computes per-validator and per-nominator reward distribution for a finished validation round using the elector's bonuses value.\n",
+    "operationId": "getRoundRewards",
+    "parameters": [
+     {
+      "description": "Election ID of the finished round. Mutually exclusive with `block` and `unixtime`.\n",
+      "in": "query",
+      "name": "election_id",
+      "required": false,
+      "schema": {
+       "format": "int64",
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Masterchain block seqno within the finished round. Mutually exclusive with `election_id` and `unixtime`.\n",
+      "in": "query",
+      "name": "block",
+      "required": false,
+      "schema": {
+       "format": "uint32",
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Unix timestamp (seconds). Looks up the masterchain block at this time and uses it as the anchor. Mutually exclusive with `election_id` and `block`.\n",
+      "in": "query",
+      "name": "unixtime",
+      "required": false,
+      "schema": {
+       "format": "uint32",
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Set to `1` to return only basic validator info (rank, pubkey, effective_stake, weight, reward, pool). Skips pool type detection, owner/validator addresses, nominator data, and returned-stake lookup — significantly faster.\n",
+      "in": "query",
+      "name": "shallow",
+      "required": false,
+      "schema": {
+       "default": false,
+       "type": "boolean"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/RoundRewardsResponse"
+        }
+       }
+      },
+      "description": "Successful response"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "summary": "Get per-validator reward distribution for a finished round",
+    "tags": [
+     "Rewards"
+    ]
+   }
+  },
+  "/v2/rewards/stats": {
+   "get": {
+    "description": "Returns time series of APY and total stake from past validation rounds.",
+    "operationId": "getRewardsStats",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/RewardsStats"
+        }
+       }
+      },
+      "description": "APY and stake statistics"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "summary": "Get historical APY and stake statistics",
+    "tags": [
+     "Rewards"
+    ]
+   }
+  },
+  "/v2/rewards/validation-rounds": {
+   "get": {
+    "description": "Returns past and current validation rounds with boundaries, stakes, and bonuses. Always uses the latest masterchain block.\n",
+    "operationId": "getValidationRounds",
+    "parameters": [
+     {
+      "description": "Return the single round matching this election ID. Mutually exclusive with `block` and `unixtime`.\n",
+      "in": "query",
+      "name": "election_id",
+      "required": false,
+      "schema": {
+       "format": "int64",
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Find the round containing this masterchain block seqno and return it plus up to `limit-1` older rounds. Mutually exclusive with `election_id` and `unixtime`.\n",
+      "in": "query",
+      "name": "block",
+      "required": false,
+      "schema": {
+       "format": "uint32",
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Unix timestamp (seconds). Looks up the masterchain block at this time and uses it as the anchor. Mutually exclusive with `election_id` and `block`.\n",
+      "in": "query",
+      "name": "unixtime",
+      "required": false,
+      "schema": {
+       "format": "uint32",
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ValidationRoundsResponse"
+        }
+       }
+      },
+      "description": "Successful response"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "summary": "Get validation round metadata",
+    "tags": [
+     "Rewards"
+    ]
+   }
+  },
+  "/v2/rewards/validators": {
+   "get": {
+    "description": "Returns all current validators with stakes, rewards, pool addresses, and (optionally) nominator breakdowns.\n",
+    "operationId": "getValidators",
+    "parameters": [
+     {
+      "description": "Masterchain block seqno. Defaults to latest. Mutually exclusive with `unixtime`.\n",
+      "in": "query",
+      "name": "seqno",
+      "required": false,
+      "schema": {
+       "format": "uint32",
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Unix timestamp (seconds). Looks up the masterchain block at this time and uses it as the anchor. Mutually exclusive with `seqno`.\n",
+      "in": "query",
+      "name": "unixtime",
+      "required": false,
+      "schema": {
+       "format": "uint32",
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Set to `1` to return only basic validator info (rank, pubkey, effective_stake, weight, reward, pool). Skips pool type detection, owner/validator addresses, nominator data, and returned-stake lookup — significantly faster.\n",
+      "in": "query",
+      "name": "shallow",
+      "required": false,
+      "schema": {
+       "default": false,
+       "type": "boolean"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ValidatorsResponse"
+        }
+       }
+      },
+      "description": "Successful response"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "summary": "Get all current validators",
+    "tags": [
+     "Rewards"
     ]
    }
   },
@@ -10498,6 +13020,31 @@
     "parameters": [
      {
       "$ref": "#/components/parameters/accountIDParameter"
+     },
+     {
+      "description": "omit this parameter to get last log entries",
+      "in": "query",
+      "name": "before_lt",
+      "required": false,
+      "schema": {
+       "example": 25758317000002,
+       "format": "int64",
+       "type": "integer",
+       "x-js-format": "bigint"
+      }
+     },
+     {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "default": 100,
+       "example": 100,
+       "format": "int32",
+       "maximum": 100,
+       "minimum": 1,
+       "type": "integer"
+      }
      }
     ],
     "responses": {
@@ -10720,7 +13267,7 @@
   },
   "/v2/traces/emulate": {
    "post": {
-    "description": "Emulate sending message to blockchain",
+    "description": "Emulate sending message to retrieve with a detailed execution trace",
     "operationId": "emulateMessageToTrace",
     "parameters": [
      {
@@ -10823,11 +13370,14 @@
   },
   "/v2/wallet/emulate": {
    "post": {
-    "description": "Emulate sending message to blockchain",
+    "description": "Emulates a wallet message on the current blockchain state and derives its consequences for the signing wallet",
     "operationId": "emulateMessageToWallet",
     "parameters": [
      {
       "$ref": "#/components/parameters/i18n"
+     },
+     {
+      "$ref": "#/components/parameters/currencyQuery"
      }
     ],
     "requestBody": {
@@ -10842,7 +13392,7 @@
         }
        }
       },
-      "description": "emulated message"
+      "description": "Emulated wallet message consequences"
      },
      "default": {
       "$ref": "#/components/responses/Error"
@@ -10850,6 +13400,35 @@
     },
     "tags": [
      "Emulation",
+     "Wallet"
+    ]
+   }
+  },
+  "/v2/wallet/{account_id}": {
+   "get": {
+    "description": "Get human-friendly information about a wallet without low-level details.",
+    "operationId": "getWalletInfo",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/accountIDParameter"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Wallet"
+        }
+       }
+      },
+      "description": "wallet"
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "tags": [
      "Wallet"
     ]
    }
@@ -10902,6 +13481,9 @@
     "url": "https://docs.tonconsole.com/tonapi/rest-api/accounts"
    },
    "name": "Accounts"
+  },
+  {
+   "name": "Migration"
   },
   {
    "externalDocs": {
@@ -10997,7 +13579,7 @@
   {
    "externalDocs": {
     "description": "Additional documentation",
-    "url": "https://docs.tonconsole.com/tonapi/rest-api/liteserver"
+    "url": "https://docs.tonconsole.com/tonapi/rest-api/lite-server"
    },
    "name": "Lite Server"
   },
@@ -11007,13 +13589,6 @@
     "url": "https://docs.tonconsole.com/tonapi/rest-api/emulation"
    },
    "name": "Emulation"
-  },
-  {
-   "externalDocs": {
-    "description": "Additional documentation",
-    "url": "https://docs.tonconsole.com/tonapi/rest-api/inscriptions"
-   },
-   "name": "Inscriptions"
   },
   {
    "externalDocs": {
@@ -11028,6 +13603,9 @@
     "url": "https://docs.tonconsole.com/tonapi/rest-api/extra-currency"
    },
    "name": "ExtraCurrency"
+  },
+  {
+   "name": "Purchases"
   }
  ]
 }

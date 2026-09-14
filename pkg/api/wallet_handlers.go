@@ -2,49 +2,111 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
+	"maps"
+
+	"github.com/sourcegraph/conc/pool"
 	"github.com/tonkeeper/opentonapi/pkg/core"
-
 	"github.com/tonkeeper/opentonapi/pkg/oas"
-	"github.com/tonkeeper/opentonapi/pkg/wallet"
 	"github.com/tonkeeper/tongo"
+	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/boc"
 	"github.com/tonkeeper/tongo/tlb"
+	"github.com/tonkeeper/tongo/ton"
 	tongoWallet "github.com/tonkeeper/tongo/wallet"
 )
 
-func (h *Handler) GetWalletsByPublicKey(ctx context.Context, params oas.GetWalletsByPublicKeyParams) (*oas.Accounts, error) {
+var errUnsupportedWalletVersion = errors.New("unsupported wallet version")
+
+func (h *Handler) GetWalletsByPublicKey(ctx context.Context, params oas.GetWalletsByPublicKeyParams) (*oas.Wallets, error) {
 	publicKey, err := hex.DecodeString(params.PublicKey)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	walletAddresses, err := h.storage.SearchAccountsByPubKey(ctx, publicKey)
-	if err != nil {
-		return nil, toError(http.StatusBadRequest, err)
-	}
-	accounts, err := h.storage.GetRawAccounts(ctx, walletAddresses)
+	versions, err := h.storage.GetWalletAddressesByPubkey(ctx, publicKey)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	results := make([]oas.Account, 0, len(accounts))
-	for _, account := range accounts {
-		ab, found := h.addressBook.GetAddressInfoByAddress(account.AccountAddress)
-		var res oas.Account
-		if found {
-			res = convertToAccount(account, &ab, h.state, h.spamFilter)
-		} else {
-			res = convertToAccount(account, nil, h.state, h.spamFilter)
-		}
-		if account.ExtraBalances != nil {
-			res.ExtraBalance = convertExtraCurrencies(account.ExtraBalances)
-		}
-		results = append(results, res)
+	wallets, statusCode, err := h.collectWallets(ctx, versions)
+	if err != nil {
+		return nil, toError(statusCode, err)
 	}
-	return &oas.Accounts{Accounts: results}, nil
+	return &oas.Wallets{Accounts: wallets}, nil
+}
+
+func (h *Handler) collectWallets(ctx context.Context, versions map[ton.AccountID]abi.ContractInterface) ([]oas.Wallet, int, error) {
+	rawAccounts, err := h.storage.GetRawAccounts(ctx, slices.Collect(maps.Keys(versions)))
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	wallets := make([]oas.Wallet, 0, len(rawAccounts))
+	for _, rawAccount := range rawAccounts {
+		if len(rawAccount.Interfaces) == 0 {
+			rawAccount.Interfaces = append(rawAccount.Interfaces, versions[rawAccount.AccountAddress])
+		}
+		converted, err, statusCode := h.processWallet(ctx, rawAccount)
+		if errors.Is(err, errUnsupportedWalletVersion) {
+			continue
+		}
+		if err != nil {
+			return nil, statusCode, err
+		}
+		wallets = append(wallets, *converted)
+	}
+	return wallets, http.StatusOK, nil
+}
+
+func (h *Handler) GetWalletsByPublicKeyBulk(ctx context.Context, request oas.OptGetWalletsByPublicKeyBulkReq) (*oas.WalletsByPublicKeys, error) {
+	if len(request.Value.PublicKeys) == 0 {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("empty list of public keys"))
+	}
+	if !h.limits.isBulkQuantityAllowed(len(request.Value.PublicKeys)) {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("the maximum number of public keys to request at once: %v", h.limits.BulkLimits))
+	}
+	pubKeys := make([]ed25519.PublicKey, 0, len(request.Value.PublicKeys))
+	canonicalKeys := request.Value.PublicKeys
+	for _, key := range request.Value.PublicKeys {
+		decoded, err := hex.DecodeString(key)
+		if err != nil {
+			return nil, toError(http.StatusBadRequest, err)
+		}
+		pubKeys = append(pubKeys, decoded)
+	}
+
+	versionsByKey, err := h.storage.GetWalletAddressesByPubkeys(ctx, pubKeys)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+
+	p := pool.NewWithResults[oas.WalletsByPublicKey]().WithContext(ctx).WithCancelOnError()
+	for idx, key := range request.Value.PublicKeys {
+		pubkey := key
+		versions, ok := versionsByKey[canonicalKeys[idx]]
+		if !ok {
+			return nil, toError(http.StatusInternalServerError, fmt.Errorf("wallet versions not found for provided public key"))
+		}
+		p.Go(func(ctx context.Context) (oas.WalletsByPublicKey, error) {
+			wallets, statusCode, err := h.collectWallets(ctx, versions)
+			if err != nil {
+				return oas.WalletsByPublicKey{}, toError(statusCode, err)
+			}
+			return oas.WalletsByPublicKey{
+				PublicKey: pubkey,
+				Wallets:   wallets,
+			}, nil
+		})
+	}
+	walletGroups, err := p.Wait()
+	if err != nil {
+		return nil, err
+	}
+	return &oas.WalletsByPublicKeys{Items: walletGroups}, nil
 }
 
 func (h *Handler) GetAccountSeqno(ctx context.Context, params oas.GetAccountSeqnoParams) (*oas.Seqno, error) {
@@ -67,13 +129,20 @@ func (h *Handler) GetAccountSeqno(ctx context.Context, params oas.GetAccountSeqn
 	if len(rawAccount.Code) == 0 {
 		return &oas.Seqno{Seqno: int32(seqno)}, nil
 	}
-	walletVersion, err := wallet.GetVersionByCode(rawAccount.Code)
+	codeCell, err := boc.DeserializeSingleRootBoc(rawAccount.Code)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
+	}
+	walletVersion, err := tongoWallet.GetVersionByCode(*codeCell)
+	if err != nil {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("contract is not a supported wallet: %v", err))
 	}
 	cells, err := boc.DeserializeBoc(rawAccount.Data)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
+	}
+	if len(cells) == 0 {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("contract doesn't have a seqno"))
 	}
 
 	switch walletVersion {
@@ -95,4 +164,72 @@ func (h *Handler) GetAccountSeqno(ctx context.Context, params oas.GetAccountSeqn
 		return nil, toError(http.StatusBadRequest, fmt.Errorf("contract doesn't have a seqno"))
 	}
 	return &oas.Seqno{Seqno: int32(seqno)}, nil
+}
+
+func (h *Handler) GetWalletInfo(ctx context.Context, params oas.GetWalletInfoParams) (*oas.Wallet, error) {
+	account, err := tongo.ParseAddress(params.AccountID)
+	if err != nil {
+		return nil, toError(http.StatusBadRequest, err)
+	}
+	rawAccount, err := h.storage.GetRawAccount(ctx, account.ID)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusNotFound, err)
+	}
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	converted, err, statusCode := h.processWallet(ctx, rawAccount)
+	if err != nil {
+		return nil, toError(statusCode, err)
+	}
+	return converted, nil
+}
+
+func (h *Handler) processWallet(ctx context.Context, account *core.Account) (*oas.Wallet, error, int) {
+	supported := map[abi.ContractInterface]struct{}{
+		abi.WalletV3R1: {}, abi.WalletV3R2: {},
+		abi.WalletV4R1: {}, abi.WalletV4R2: {},
+		abi.WalletV5Beta: {}, abi.WalletV5R1: {},
+	}
+	var (
+		walletVersion abi.ContractInterface
+		sigAllowed    *bool
+	)
+	for _, intr := range account.Interfaces {
+		if _, ok := supported[intr]; ok {
+			walletVersion = intr
+			if intr == abi.WalletV5R1 {
+				sa, err := h.storage.GetWalletSignatureAllowed(ctx, account.AccountAddress)
+				if err != nil && errors.Is(err, core.ErrEntityNotFound) {
+					sa = true // TODO: not indexed?
+				} else if err != nil {
+					return nil, err, http.StatusInternalServerError
+				}
+				sigAllowed = &sa
+			}
+			break
+		}
+	}
+	if walletVersion == 0 {
+		return nil, errUnsupportedWalletVersion, http.StatusBadRequest
+	}
+	stats, err := h.storage.GetAccountsStats(ctx, []ton.AccountID{account.AccountAddress})
+	if err != nil {
+		return nil, err, http.StatusInternalServerError
+	}
+	if len(stats) == 0 {
+		return nil, errors.New("account not found"), http.StatusNotFound
+	}
+	plugins, err := h.storage.GetAccountPlugins(ctx, account.AccountAddress, walletVersion)
+	if err != nil {
+		return nil, err, http.StatusInternalServerError
+	}
+	var converted oas.Wallet
+	ab, found := h.addressBook.GetAddressInfoByAddress(account.AccountAddress)
+	if found {
+		converted = convertToWallet(account, &ab, h.state, stats[0], plugins, sigAllowed)
+	} else {
+		converted = convertToWallet(account, nil, h.state, stats[0], plugins, sigAllowed)
+	}
+	return &converted, nil, http.StatusOK
 }

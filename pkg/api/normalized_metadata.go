@@ -1,16 +1,14 @@
 package api
 
 import (
-	"math/big"
+	"github.com/tonkeeper/tongo/ton"
 	"strconv"
 
-	"github.com/shopspring/decimal"
 	"github.com/tonkeeper/opentonapi/pkg/addressbook"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	imgGenerator "github.com/tonkeeper/opentonapi/pkg/image"
 	"github.com/tonkeeper/opentonapi/pkg/references"
 	"github.com/tonkeeper/tongo/tep64"
-	"github.com/tonkeeper/tongo/tlb"
 )
 
 const UnknownJettonName = "UKWN"
@@ -33,14 +31,14 @@ type NormalizedMetadata struct {
 	PreviewImage        string // path to the converted image
 }
 
-func NormalizeMetadata(meta tep64.Metadata, info *addressbook.KnownJetton, trust core.TrustType) NormalizedMetadata {
+func NormalizeMetadata(addr ton.AccountID, meta tep64.Metadata, info *addressbook.KnownJetton, trust core.TrustType) NormalizedMetadata {
 	symbol := meta.Symbol
 	if symbol == "" {
-		symbol = UnknownJettonName
+		symbol = UnknownJettonName + addr.ToHuman(true, false)[44:]
 	}
 	name := meta.Name
 	if name == "" {
-		name = "Unknown Token"
+		name = "Unknown Token" + addr.ToHuman(true, false)[44:]
 	}
 	var image string
 	if meta.Image != "" {
@@ -85,15 +83,4 @@ func convertJettonDecimals(decimals string) int {
 		return 9
 	}
 	return dec
-}
-
-// Scale returns a proper decimal representation of jettons taking metadata.Decimals into account.
-func Scale(amount tlb.VarUInteger16, decimals int) decimal.Decimal {
-	value := big.Int(amount)
-	return decimal.NewFromBigInt(&value, int32(-decimals))
-}
-
-// ScaleJettons returns a proper decimal representation of jettons taking metadata.Decimals into account.
-func ScaleJettons(amount big.Int, decimals int) decimal.Decimal {
-	return decimal.NewFromBigInt(&amount, int32(-decimals))
 }

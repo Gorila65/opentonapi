@@ -40,27 +40,34 @@ type Handler interface {
 	//
 	// GET /v2/dns/{domain_name}/resolve
 	DnsResolve(ctx context.Context, params DnsResolveParams) (*DnsRecord, error)
+	// DownloadBlockchainBlockBoc implements downloadBlockchainBlockBoc operation.
+	//
+	// Download blockchain block BOC.
+	//
+	// GET /v2/blockchain/blocks/{block_id}/boc
+	DownloadBlockchainBlockBoc(ctx context.Context, params DownloadBlockchainBlockBocParams) (*DownloadBlockchainBlockBocOKHeaders, error)
 	// EmulateMessageToAccountEvent implements emulateMessageToAccountEvent operation.
 	//
-	// Emulate sending message to blockchain.
+	// Emulate sending message to retrieve account-specific events.
 	//
 	// POST /v2/accounts/{account_id}/events/emulate
 	EmulateMessageToAccountEvent(ctx context.Context, req *EmulateMessageToAccountEventReq, params EmulateMessageToAccountEventParams) (*AccountEvent, error)
 	// EmulateMessageToEvent implements emulateMessageToEvent operation.
 	//
-	// Emulate sending message to blockchain.
+	// Emulate sending message to retrieve general blockchain events.
 	//
 	// POST /v2/events/emulate
 	EmulateMessageToEvent(ctx context.Context, req *EmulateMessageToEventReq, params EmulateMessageToEventParams) (*Event, error)
 	// EmulateMessageToTrace implements emulateMessageToTrace operation.
 	//
-	// Emulate sending message to blockchain.
+	// Emulate sending message to retrieve with a detailed execution trace.
 	//
 	// POST /v2/traces/emulate
 	EmulateMessageToTrace(ctx context.Context, req *EmulateMessageToTraceReq, params EmulateMessageToTraceParams) (*Trace, error)
 	// EmulateMessageToWallet implements emulateMessageToWallet operation.
 	//
-	// Emulate sending message to blockchain.
+	// Emulates a wallet message on the current blockchain state and derives its consequences for the
+	// signing wallet.
 	//
 	// POST /v2/wallet/emulate
 	EmulateMessageToWallet(ctx context.Context, req *EmulateMessageToWalletReq, params EmulateMessageToWalletParams) (*MessageConsequences, error)
@@ -70,6 +77,12 @@ type Handler interface {
 	//
 	// GET /v2/blockchain/accounts/{account_id}/methods/{method_name}
 	ExecGetMethodForBlockchainAccount(ctx context.Context, params ExecGetMethodForBlockchainAccountParams) (*MethodExecutionResult, error)
+	// ExecGetMethodWithBodyForBlockchainAccount implements execGetMethodWithBodyForBlockchainAccount operation.
+	//
+	// Execute get method for account.
+	//
+	// POST /v2/blockchain/accounts/{account_id}/methods/{method_name}
+	ExecGetMethodWithBodyForBlockchainAccount(ctx context.Context, req OptExecGetMethodWithBodyForBlockchainAccountReq, params ExecGetMethodWithBodyForBlockchainAccountParams) (*MethodExecutionResult, error)
 	// GaslessConfig implements gaslessConfig operation.
 	//
 	// Returns configuration of gasless transfers.
@@ -87,13 +100,20 @@ type Handler interface {
 	// Submits the signed gasless transaction message to the network.
 	//
 	// POST /v2/gasless/send
-	GaslessSend(ctx context.Context, req *GaslessSendReq) error
+	GaslessSend(ctx context.Context, req *GaslessSendReq) (*GaslessTx, error)
 	// GetAccount implements getAccount operation.
 	//
 	// Get human-friendly information about an account without low-level details.
 	//
 	// GET /v2/accounts/{account_id}
 	GetAccount(ctx context.Context, params GetAccountParams) (*Account, error)
+	// GetAccountDefiAssets implements getAccountDefiAssets operation.
+	//
+	// Return DeFi assets locked in custom smart contracts: currently returns TON Whales staking and EVAA
+	// lending positions.
+	//
+	// GET /v2/accounts/{account_id}/defi/assets
+	GetAccountDefiAssets(ctx context.Context, params GetAccountDefiAssetsParams) (*DefiAssets, error)
 	// GetAccountDiff implements getAccountDiff operation.
 	//
 	// Get account's balance change.
@@ -134,26 +154,6 @@ type Handler interface {
 	//
 	// POST /v2/tonconnect/stateinit
 	GetAccountInfoByStateInit(ctx context.Context, req *GetAccountInfoByStateInitReq) (*AccountInfoByStateInit, error)
-	// GetAccountInscriptions implements getAccountInscriptions operation.
-	//
-	// Get all inscriptions by owner address. It's experimental API and can be dropped in the future.
-	//
-	// GET /v2/experimental/accounts/{account_id}/inscriptions
-	GetAccountInscriptions(ctx context.Context, params GetAccountInscriptionsParams) (*InscriptionBalances, error)
-	// GetAccountInscriptionsHistory implements getAccountInscriptionsHistory operation.
-	//
-	// Get the transfer inscriptions history for account. It's experimental API and can be dropped in the
-	// future.
-	//
-	// GET /v2/experimental/accounts/{account_id}/inscriptions/history
-	GetAccountInscriptionsHistory(ctx context.Context, params GetAccountInscriptionsHistoryParams) (*AccountEvents, error)
-	// GetAccountInscriptionsHistoryByTicker implements getAccountInscriptionsHistoryByTicker operation.
-	//
-	// Get the transfer inscriptions history for account. It's experimental API and can be dropped in the
-	// future.
-	//
-	// GET /v2/experimental/accounts/{account_id}/inscriptions/{ticker}/history
-	GetAccountInscriptionsHistoryByTicker(ctx context.Context, params GetAccountInscriptionsHistoryByTickerParams) (*AccountEvents, error)
 	// GetAccountJettonBalance implements getAccountJettonBalance operation.
 	//
 	// Get Jetton balance by owner address.
@@ -162,7 +162,9 @@ type Handler interface {
 	GetAccountJettonBalance(ctx context.Context, params GetAccountJettonBalanceParams) (*JettonBalance, error)
 	// GetAccountJettonHistoryByID implements getAccountJettonHistoryByID operation.
 	//
-	// Get the transfer jetton history for account and jetton.
+	// Please use `getJettonAccountHistoryByID`` instead.
+	//
+	// Deprecated: schema marks this operation as deprecated.
 	//
 	// GET /v2/accounts/{account_id}/jettons/{jetton_id}/history
 	GetAccountJettonHistoryByID(ctx context.Context, params GetAccountJettonHistoryByIDParams) (*AccountEvents, error)
@@ -177,7 +179,7 @@ type Handler interface {
 	// Get the transfer jettons history for account.
 	//
 	// GET /v2/accounts/{account_id}/jettons/history
-	GetAccountJettonsHistory(ctx context.Context, params GetAccountJettonsHistoryParams) (*AccountEvents, error)
+	GetAccountJettonsHistory(ctx context.Context, params GetAccountJettonsHistoryParams) (*JettonOperations, error)
 	// GetAccountMultisigs implements getAccountMultisigs operation.
 	//
 	// Get account's multisigs.
@@ -189,7 +191,7 @@ type Handler interface {
 	// Get the transfer nft history.
 	//
 	// GET /v2/accounts/{account_id}/nfts/history
-	GetAccountNftHistory(ctx context.Context, params GetAccountNftHistoryParams) (*AccountEvents, error)
+	GetAccountNftHistory(ctx context.Context, params GetAccountNftHistoryParams) (*NftOperations, error)
 	// GetAccountNftItems implements getAccountNftItems operation.
 	//
 	// Get all NFT items by owner address.
@@ -308,6 +310,12 @@ type Handler interface {
 	//
 	// GET /v2/blockchain/accounts/{account_id}
 	GetBlockchainRawAccount(ctx context.Context, params GetBlockchainRawAccountParams) (*BlockchainRawAccount, error)
+	// GetBlockchainRawAccounts implements getBlockchainRawAccounts operation.
+	//
+	// Get low-level information about several accounts taken directly from the blockchain.
+	//
+	// POST /v2/blockchain/accounts/_bulk
+	GetBlockchainRawAccounts(ctx context.Context, req OptGetBlockchainRawAccountsReq) (*BlockchainRawAccounts, error)
 	// GetBlockchainTransaction implements getBlockchainTransaction operation.
 	//
 	// Get transaction data.
@@ -361,19 +369,18 @@ type Handler interface {
 	//
 	// GET /v2/extra-currency/{id}
 	GetExtraCurrencyInfo(ctx context.Context, params GetExtraCurrencyInfoParams) (*EcPreview, error)
-	// GetInscriptionOpTemplate implements getInscriptionOpTemplate operation.
-	//
-	// Return comment for making operation with inscription. please don't use it if you don't know what
-	// you are doing.
-	//
-	// GET /v2/experimental/inscriptions/op-template
-	GetInscriptionOpTemplate(ctx context.Context, params GetInscriptionOpTemplateParams) (*GetInscriptionOpTemplateOK, error)
 	// GetItemsFromCollection implements getItemsFromCollection operation.
 	//
 	// Get NFT items from collection by collection address.
 	//
 	// GET /v2/nfts/collections/{account_id}/items
 	GetItemsFromCollection(ctx context.Context, params GetItemsFromCollectionParams) (*NftItems, error)
+	// GetJettonAccountHistoryByID implements getJettonAccountHistoryByID operation.
+	//
+	// Get the transfer jetton history for account and jetton.
+	//
+	// GET /v2/jettons/{jetton_id}/accounts/{account_id}/history
+	GetJettonAccountHistoryByID(ctx context.Context, params GetJettonAccountHistoryByIDParams) (*JettonOperations, error)
 	// GetJettonHolders implements getJettonHolders operation.
 	//
 	// Get jetton's holders.
@@ -410,18 +417,37 @@ type Handler interface {
 	//
 	// GET /v2/events/{event_id}/jettons
 	GetJettonsEvents(ctx context.Context, params GetJettonsEventsParams) (*Event, error)
+	// GetLibraryByHash implements getLibraryByHash operation.
+	//
+	// Get library cell.
+	//
+	// GET /v2/blockchain/libraries/{hash}
+	GetLibraryByHash(ctx context.Context, params GetLibraryByHashParams) (*BlockchainLibrary, error)
 	// GetMarketsRates implements getMarketsRates operation.
 	//
-	// Get the TON price from markets.
+	// Get the Gram price from markets.
 	//
 	// GET /v2/rates/markets
 	GetMarketsRates(ctx context.Context) (*GetMarketsRatesOK, error)
+	// GetMigrationWallets implements getMigrationWallets operation.
+	//
+	// Get migratable assets value (TON balance, jettons with prices, NFT count) for several wallets at
+	// once.
+	//
+	// POST /v2/migration/wallets
+	GetMigrationWallets(ctx context.Context, req OptGetMigrationWalletsReq, params GetMigrationWalletsParams) (*MigrationWallets, error)
 	// GetMultisigAccount implements getMultisigAccount operation.
 	//
 	// Get multisig account info.
 	//
 	// GET /v2/multisig/{account_id}
 	GetMultisigAccount(ctx context.Context, params GetMultisigAccountParams) (*Multisig, error)
+	// GetMultisigOrder implements getMultisigOrder operation.
+	//
+	// Get multisig order.
+	//
+	// GET /v2/multisig/order/{account_id}
+	GetMultisigOrder(ctx context.Context, params GetMultisigOrderParams) (*MultisigOrder, error)
 	// GetNftCollection implements getNftCollection operation.
 	//
 	// Get NFT collection by collection address.
@@ -442,7 +468,9 @@ type Handler interface {
 	GetNftCollections(ctx context.Context, params GetNftCollectionsParams) (*NftCollections, error)
 	// GetNftHistoryByID implements getNftHistoryByID operation.
 	//
-	// Get the transfer nfts history for account.
+	// Please use `getAccountNftHistory`` instead.
+	//
+	// Deprecated: schema marks this operation as deprecated.
 	//
 	// GET /v2/nfts/{account_id}/history
 	GetNftHistoryByID(ctx context.Context, params GetNftHistoryByIDParams) (*AccountEvents, error)
@@ -476,6 +504,12 @@ type Handler interface {
 	//
 	// GET /v2/liteserver/get_out_msg_queue_sizes
 	GetOutMsgQueueSizes(ctx context.Context) (*GetOutMsgQueueSizesOK, error)
+	// GetPurchaseHistory implements getPurchaseHistory operation.
+	//
+	// Get history of purchases.
+	//
+	// GET /v2/purchases/{account_id}/history
+	GetPurchaseHistory(ctx context.Context, params GetPurchaseHistoryParams) (*AccountPurchases, error)
 	// GetRates implements getRates operation.
 	//
 	// Get the token price in the chosen currency for display only. Don’t use this for financial
@@ -579,6 +613,25 @@ type Handler interface {
 	//
 	// GET /v2/blockchain/reduced/blocks
 	GetReducedBlockchainBlocks(ctx context.Context, params GetReducedBlockchainBlocksParams) (*ReducedBlocks, error)
+	// GetRewardsApy implements getRewardsApy operation.
+	//
+	// Returns the current TON blockchain APY as a percent based on the latest completed validation round.
+	//
+	// GET /v2/rewards/apy
+	GetRewardsApy(ctx context.Context) (float64, error)
+	// GetRewardsStats implements getRewardsStats operation.
+	//
+	// Returns time series of APY and total stake from past validation rounds.
+	//
+	// GET /v2/rewards/stats
+	GetRewardsStats(ctx context.Context) (*RewardsStats, error)
+	// GetRoundRewards implements getRoundRewards operation.
+	//
+	// Computes per-validator and per-nominator reward distribution for a finished validation round using
+	// the elector's bonuses value.
+	//
+	// GET /v2/rewards/round-rewards
+	GetRoundRewards(ctx context.Context, params GetRoundRewardsParams) (*RoundRewardsResponse, error)
 	// GetStakingPoolHistory implements getStakingPoolHistory operation.
 	//
 	// Pool history.
@@ -615,12 +668,44 @@ type Handler interface {
 	//
 	// GET /v2/traces/{trace_id}
 	GetTrace(ctx context.Context, params GetTraceParams) (*Trace, error)
+	// GetValidationRounds implements getValidationRounds operation.
+	//
+	// Returns past and current validation rounds with boundaries, stakes, and bonuses. Always uses the
+	// latest masterchain block.
+	//
+	// GET /v2/rewards/validation-rounds
+	GetValidationRounds(ctx context.Context, params GetValidationRoundsParams) (*ValidationRoundsResponse, error)
+	// GetValidators implements getValidators operation.
+	//
+	// Returns all current validators with stakes, rewards, pool addresses, and (optionally) nominator
+	// breakdowns.
+	//
+	// GET /v2/rewards/validators
+	GetValidators(ctx context.Context, params GetValidatorsParams) (*ValidatorsResponse, error)
+	// GetWalletInfo implements getWalletInfo operation.
+	//
+	// Get human-friendly information about a wallet without low-level details.
+	//
+	// GET /v2/wallet/{account_id}
+	GetWalletInfo(ctx context.Context, params GetWalletInfoParams) (*Wallet, error)
 	// GetWalletsByPublicKey implements getWalletsByPublicKey operation.
 	//
 	// Get wallets by public key.
 	//
 	// GET /v2/pubkeys/{public_key}/wallets
-	GetWalletsByPublicKey(ctx context.Context, params GetWalletsByPublicKeyParams) (*Accounts, error)
+	GetWalletsByPublicKey(ctx context.Context, params GetWalletsByPublicKeyParams) (*Wallets, error)
+	// GetWalletsByPublicKeyBulk implements getWalletsByPublicKeyBulk operation.
+	//
+	// Get wallets by a list of public keys.
+	//
+	// POST /v2/pubkeys/wallets/_bulk
+	GetWalletsByPublicKeyBulk(ctx context.Context, req OptGetWalletsByPublicKeyBulkReq) (*WalletsByPublicKeys, error)
+	// PrepareMigration implements prepareMigration operation.
+	//
+	// Prepare ordered signable transactions that migrate every asset from `from` to `to`.
+	//
+	// POST /v2/migration/prepare
+	PrepareMigration(ctx context.Context, req *MigrationPrepareRequest) (PrepareMigrationRes, error)
 	// ReindexAccount implements reindexAccount operation.
 	//
 	// Update internal cache for a particular account.

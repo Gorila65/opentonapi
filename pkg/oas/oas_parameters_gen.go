@@ -7,7 +7,6 @@ import (
 	"net/url"
 
 	"github.com/go-faster/errors"
-
 	"github.com/ogen-go/ogen/conv"
 	"github.com/ogen-go/ogen/middleware"
 	"github.com/ogen-go/ogen/ogenerrors"
@@ -217,6 +216,7 @@ func decodeBlockchainAccountInspectParams(args [1]string, argsEscaped bool, r *h
 type DnsResolveParams struct {
 	// Domain name with .ton or .t.me.
 	DomainName string
+	Filter     OptBool `json:",omitempty,omitzero"`
 }
 
 func unpackDnsResolveParams(packed middleware.Parameters) (params DnsResolveParams) {
@@ -227,10 +227,20 @@ func unpackDnsResolveParams(packed middleware.Parameters) (params DnsResolvePara
 		}
 		params.DomainName = packed[key].(string)
 	}
+	{
+		key := middleware.ParameterKey{
+			Name: "filter",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Filter = v.(OptBool)
+		}
+	}
 	return params
 }
 
 func decodeDnsResolveParams(args [1]string, argsEscaped bool, r *http.Request) (params DnsResolveParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
 	// Decode path: domain_name.
 	if err := func() error {
 		param := args[0]
@@ -276,15 +286,127 @@ func decodeDnsResolveParams(args [1]string, argsEscaped bool, r *http.Request) (
 			Err:  err,
 		}
 	}
+	// Set default value for query: filter.
+	{
+		val := bool(false)
+		params.Filter.SetTo(val)
+	}
+	// Decode query: filter.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "filter",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotFilterVal bool
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToBool(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotFilterVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Filter.SetTo(paramsDotFilterVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "filter",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// DownloadBlockchainBlockBocParams is parameters of downloadBlockchainBlockBoc operation.
+type DownloadBlockchainBlockBocParams struct {
+	// Block ID.
+	BlockID string
+}
+
+func unpackDownloadBlockchainBlockBocParams(packed middleware.Parameters) (params DownloadBlockchainBlockBocParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "block_id",
+			In:   "path",
+		}
+		params.BlockID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeDownloadBlockchainBlockBocParams(args [1]string, argsEscaped bool, r *http.Request) (params DownloadBlockchainBlockBocParams, _ error) {
+	// Decode path: block_id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "block_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.BlockID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "block_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
 	return params, nil
 }
 
 // EmulateMessageToAccountEventParams is parameters of emulateMessageToAccountEvent operation.
 type EmulateMessageToAccountEventParams struct {
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Account ID.
 	AccountID            string
-	IgnoreSignatureCheck OptBool
+	IgnoreSignatureCheck OptBool `json:",omitempty,omitzero"`
 }
 
 func unpackEmulateMessageToAccountEventParams(packed middleware.Parameters) (params EmulateMessageToAccountEventParams) {
@@ -454,8 +576,8 @@ func decodeEmulateMessageToAccountEventParams(args [1]string, argsEscaped bool, 
 
 // EmulateMessageToEventParams is parameters of emulateMessageToEvent operation.
 type EmulateMessageToEventParams struct {
-	AcceptLanguage       OptString
-	IgnoreSignatureCheck OptBool
+	AcceptLanguage       OptString `json:",omitempty,omitzero"`
+	IgnoreSignatureCheck OptBool   `json:",omitempty,omitzero"`
 }
 
 func unpackEmulateMessageToEventParams(packed middleware.Parameters) (params EmulateMessageToEventParams) {
@@ -573,7 +695,7 @@ func decodeEmulateMessageToEventParams(args [0]string, argsEscaped bool, r *http
 
 // EmulateMessageToTraceParams is parameters of emulateMessageToTrace operation.
 type EmulateMessageToTraceParams struct {
-	IgnoreSignatureCheck OptBool
+	IgnoreSignatureCheck OptBool `json:",omitempty,omitzero"`
 }
 
 func unpackEmulateMessageToTraceParams(packed middleware.Parameters) (params EmulateMessageToTraceParams) {
@@ -637,7 +759,8 @@ func decodeEmulateMessageToTraceParams(args [0]string, argsEscaped bool, r *http
 
 // EmulateMessageToWalletParams is parameters of emulateMessageToWallet operation.
 type EmulateMessageToWalletParams struct {
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
+	Currency       OptString `json:",omitempty,omitzero"`
 }
 
 func unpackEmulateMessageToWalletParams(packed middleware.Parameters) (params EmulateMessageToWalletParams) {
@@ -650,10 +773,20 @@ func unpackEmulateMessageToWalletParams(packed middleware.Parameters) (params Em
 			params.AcceptLanguage = v.(OptString)
 		}
 	}
+	{
+		key := middleware.ParameterKey{
+			Name: "currency",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Currency = v.(OptString)
+		}
+	}
 	return params
 }
 
 func decodeEmulateMessageToWalletParams(args [0]string, argsEscaped bool, r *http.Request) (params EmulateMessageToWalletParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
 	h := uri.NewHeaderDecoder(r.Header)
 	// Set default value for header: Accept-Language.
 	{
@@ -699,6 +832,47 @@ func decodeEmulateMessageToWalletParams(args [0]string, argsEscaped bool, r *htt
 			Err:  err,
 		}
 	}
+	// Decode query: currency.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "currency",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotCurrencyVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotCurrencyVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Currency.SetTo(paramsDotCurrencyVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "currency",
+			In:   "query",
+			Err:  err,
+		}
+	}
 	return params, nil
 }
 
@@ -708,8 +882,7 @@ type ExecGetMethodForBlockchainAccountParams struct {
 	AccountID string
 	// Contract get method name.
 	MethodName string
-	Args       []string
-	FixOrder   OptBool
+	Args       []string `json:",omitempty"`
 }
 
 func unpackExecGetMethodForBlockchainAccountParams(packed middleware.Parameters) (params ExecGetMethodForBlockchainAccountParams) {
@@ -734,15 +907,6 @@ func unpackExecGetMethodForBlockchainAccountParams(packed middleware.Parameters)
 		}
 		if v, ok := packed[key]; ok {
 			params.Args = v.([]string)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "fix_order",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.FixOrder = v.(OptBool)
 		}
 	}
 	return params
@@ -883,49 +1047,123 @@ func decodeExecGetMethodForBlockchainAccountParams(args [2]string, argsEscaped b
 			Err:  err,
 		}
 	}
-	// Set default value for query: fix_order.
+	return params, nil
+}
+
+// ExecGetMethodWithBodyForBlockchainAccountParams is parameters of execGetMethodWithBodyForBlockchainAccount operation.
+type ExecGetMethodWithBodyForBlockchainAccountParams struct {
+	// Account ID.
+	AccountID string
+	// Contract get method name.
+	MethodName string
+}
+
+func unpackExecGetMethodWithBodyForBlockchainAccountParams(packed middleware.Parameters) (params ExecGetMethodWithBodyForBlockchainAccountParams) {
 	{
-		val := bool(true)
-		params.FixOrder.SetTo(val)
-	}
-	// Decode query: fix_order.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "fix_order",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
+		key := middleware.ParameterKey{
+			Name: "account_id",
+			In:   "path",
 		}
+		params.AccountID = packed[key].(string)
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "method_name",
+			In:   "path",
+		}
+		params.MethodName = packed[key].(string)
+	}
+	return params
+}
 
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotFixOrderVal bool
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
+func decodeExecGetMethodWithBodyForBlockchainAccountParams(args [2]string, argsEscaped bool, r *http.Request) (params ExecGetMethodWithBodyForBlockchainAccountParams, _ error) {
+	// Decode path: account_id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "account_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
 
-					c, err := conv.ToBool(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotFixOrderVal = c
-					return nil
-				}(); err != nil {
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
 					return err
 				}
-				params.FixOrder.SetTo(paramsDotFixOrderVal)
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.AccountID = c
 				return nil
-			}); err != nil {
+			}(); err != nil {
 				return err
 			}
+		} else {
+			return validate.ErrFieldRequired
 		}
 		return nil
 	}(); err != nil {
 		return params, &ogenerrors.DecodeParamError{
-			Name: "fix_order",
-			In:   "query",
+			Name: "account_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	// Decode path: method_name.
+	if err := func() error {
+		param := args[1]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[1])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "method_name",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.MethodName = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "method_name",
+			In:   "path",
 			Err:  err,
 		}
 	}
@@ -934,11 +1172,21 @@ func decodeExecGetMethodForBlockchainAccountParams(args [2]string, argsEscaped b
 
 // GaslessEstimateParams is parameters of gaslessEstimate operation.
 type GaslessEstimateParams struct {
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Jetton to pay commission.
 	MasterID string
 }
 
 func unpackGaslessEstimateParams(packed middleware.Parameters) (params GaslessEstimateParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "Accept-Language",
+			In:   "header",
+		}
+		if v, ok := packed[key]; ok {
+			params.AcceptLanguage = v.(OptString)
+		}
+	}
 	{
 		key := middleware.ParameterKey{
 			Name: "master_id",
@@ -950,6 +1198,51 @@ func unpackGaslessEstimateParams(packed middleware.Parameters) (params GaslessEs
 }
 
 func decodeGaslessEstimateParams(args [1]string, argsEscaped bool, r *http.Request) (params GaslessEstimateParams, _ error) {
+	h := uri.NewHeaderDecoder(r.Header)
+	// Set default value for header: Accept-Language.
+	{
+		val := string("en")
+		params.AcceptLanguage.SetTo(val)
+	}
+	// Decode header: Accept-Language.
+	if err := func() error {
+		cfg := uri.HeaderParameterDecodingConfig{
+			Name:    "Accept-Language",
+			Explode: false,
+		}
+		if err := h.HasParam(cfg); err == nil {
+			if err := h.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotAcceptLanguageVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotAcceptLanguageVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.AcceptLanguage.SetTo(paramsDotAcceptLanguageVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "Accept-Language",
+			In:   "header",
+			Err:  err,
+		}
+	}
 	// Decode path: master_id.
 	if err := func() error {
 		param := args[0]
@@ -1016,6 +1309,72 @@ func unpackGetAccountParams(packed middleware.Parameters) (params GetAccountPara
 }
 
 func decodeGetAccountParams(args [1]string, argsEscaped bool, r *http.Request) (params GetAccountParams, _ error) {
+	// Decode path: account_id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "account_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.AccountID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "account_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// GetAccountDefiAssetsParams is parameters of getAccountDefiAssets operation.
+type GetAccountDefiAssetsParams struct {
+	// Account ID.
+	AccountID string
+}
+
+func unpackGetAccountDefiAssetsParams(packed middleware.Parameters) (params GetAccountDefiAssetsParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "account_id",
+			In:   "path",
+		}
+		params.AccountID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeGetAccountDefiAssetsParams(args [1]string, argsEscaped bool, r *http.Request) (params GetAccountDefiAssetsParams, _ error) {
 	// Decode path: account_id.
 	if err := func() error {
 		param := args[0]
@@ -1179,6 +1538,7 @@ func decodeGetAccountDiffParams(args [1]string, argsEscaped bool, r *http.Reques
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.StartDate)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -1187,7 +1547,7 @@ func decodeGetAccountDiffParams(args [1]string, argsEscaped bool, r *http.Reques
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -1232,6 +1592,7 @@ func decodeGetAccountDiffParams(args [1]string, argsEscaped bool, r *http.Reques
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.EndDate)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -1240,7 +1601,7 @@ func decodeGetAccountDiffParams(args [1]string, argsEscaped bool, r *http.Reques
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -1258,7 +1619,7 @@ type GetAccountDnsExpiringParams struct {
 	// Account ID.
 	AccountID string
 	// Number of days before expiration.
-	Period OptInt
+	Period OptInt `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountDnsExpiringParams(packed middleware.Parameters) (params GetAccountDnsExpiringParams) {
@@ -1372,6 +1733,7 @@ func decodeGetAccountDnsExpiringParams(args [1]string, argsEscaped bool, r *http
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -1402,9 +1764,9 @@ type GetAccountEventParams struct {
 	AccountID string
 	// Event ID or transaction hash in hex (without 0x) or base64url format.
 	EventID        string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Filter actions where requested account is not real subject (for example sender or receiver jettons).
-	SubjectOnly OptBool
+	SubjectOnly OptBool `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountEventParams(packed middleware.Parameters) (params GetAccountEventParams) {
@@ -1633,16 +1995,19 @@ func decodeGetAccountEventParams(args [2]string, argsEscaped bool, r *http.Reque
 type GetAccountEventsParams struct {
 	// Account ID.
 	AccountID      string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Show only events that are initiated by this account.
-	Initiator OptBool
+	Initiator OptBool `json:",omitempty,omitzero"`
 	// Filter actions where requested account is not real subject (for example sender or receiver jettons).
-	SubjectOnly OptBool
+	SubjectOnly OptBool `json:",omitempty,omitzero"`
 	// Omit this parameter to get last events.
-	BeforeLt  OptInt64
+	AfterLt OptInt64 `json:",omitempty,omitzero"`
+	// Omit this parameter to get last events.
+	BeforeLt  OptInt64 `json:",omitempty,omitzero"`
 	Limit     int
-	StartDate OptInt64
-	EndDate   OptInt64
+	StartDate OptInt64                     `json:",omitempty,omitzero"`
+	EndDate   OptInt64                     `json:",omitempty,omitzero"`
+	SortOrder OptGetAccountEventsSortOrder `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountEventsParams(packed middleware.Parameters) (params GetAccountEventsParams) {
@@ -1682,6 +2047,15 @@ func unpackGetAccountEventsParams(packed middleware.Parameters) (params GetAccou
 	}
 	{
 		key := middleware.ParameterKey{
+			Name: "after_lt",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.AfterLt = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
 			Name: "before_lt",
 			In:   "query",
 		}
@@ -1712,6 +2086,15 @@ func unpackGetAccountEventsParams(packed middleware.Parameters) (params GetAccou
 		}
 		if v, ok := packed[key]; ok {
 			params.EndDate = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "sort_order",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.SortOrder = v.(OptGetAccountEventsSortOrder)
 		}
 	}
 	return params
@@ -1901,6 +2284,47 @@ func decodeGetAccountEventsParams(args [1]string, argsEscaped bool, r *http.Requ
 			Err:  err,
 		}
 	}
+	// Decode query: after_lt.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "after_lt",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotAfterLtVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotAfterLtVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.AfterLt.SetTo(paramsDotAfterLtVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "after_lt",
+			In:   "query",
+			Err:  err,
+		}
+	}
 	// Decode query: before_lt.
 	if err := func() error {
 		cfg := uri.QueryParameterDecodingConfig{
@@ -1977,6 +2401,7 @@ func decodeGetAccountEventsParams(args [1]string, argsEscaped bool, r *http.Requ
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.Limit)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -1985,7 +2410,7 @@ func decodeGetAccountEventsParams(args [1]string, argsEscaped bool, r *http.Requ
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -2039,6 +2464,7 @@ func decodeGetAccountEventsParams(args [1]string, argsEscaped bool, r *http.Requ
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -2104,6 +2530,7 @@ func decodeGetAccountEventsParams(args [1]string, argsEscaped bool, r *http.Requ
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -2125,6 +2552,67 @@ func decodeGetAccountEventsParams(args [1]string, argsEscaped bool, r *http.Requ
 			Err:  err,
 		}
 	}
+	// Set default value for query: sort_order.
+	{
+		val := GetAccountEventsSortOrder("desc")
+		params.SortOrder.SetTo(val)
+	}
+	// Decode query: sort_order.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "sort_order",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotSortOrderVal GetAccountEventsSortOrder
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotSortOrderVal = GetAccountEventsSortOrder(c)
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.SortOrder.SetTo(paramsDotSortOrderVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.SortOrder.Get(); ok {
+					if err := func() error {
+						if err := value.Validate(); err != nil {
+							return err
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "sort_order",
+			In:   "query",
+			Err:  err,
+		}
+	}
 	return params, nil
 }
 
@@ -2134,12 +2622,12 @@ type GetAccountExtraCurrencyHistoryByIDParams struct {
 	AccountID string
 	// Extra currency id.
 	ID             int32
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Omit this parameter to get last events.
-	BeforeLt  OptInt64
+	BeforeLt  OptInt64 `json:",omitempty,omitzero"`
 	Limit     int
-	StartDate OptInt64
-	EndDate   OptInt64
+	StartDate OptInt64 `json:",omitempty,omitzero"`
+	EndDate   OptInt64 `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountExtraCurrencyHistoryByIDParams(packed middleware.Parameters) (params GetAccountExtraCurrencyHistoryByIDParams) {
@@ -2416,6 +2904,7 @@ func decodeGetAccountExtraCurrencyHistoryByIDParams(args [2]string, argsEscaped 
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.Limit)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -2424,7 +2913,7 @@ func decodeGetAccountExtraCurrencyHistoryByIDParams(args [2]string, argsEscaped 
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -2478,6 +2967,7 @@ func decodeGetAccountExtraCurrencyHistoryByIDParams(args [2]string, argsEscaped 
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -2543,6 +3033,7 @@ func decodeGetAccountExtraCurrencyHistoryByIDParams(args [2]string, argsEscaped 
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -2567,804 +3058,16 @@ func decodeGetAccountExtraCurrencyHistoryByIDParams(args [2]string, argsEscaped 
 	return params, nil
 }
 
-// GetAccountInscriptionsParams is parameters of getAccountInscriptions operation.
-type GetAccountInscriptionsParams struct {
-	// Account ID.
-	AccountID string
-	Limit     OptInt
-	Offset    OptInt
-}
-
-func unpackGetAccountInscriptionsParams(packed middleware.Parameters) (params GetAccountInscriptionsParams) {
-	{
-		key := middleware.ParameterKey{
-			Name: "account_id",
-			In:   "path",
-		}
-		params.AccountID = packed[key].(string)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "limit",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.Limit = v.(OptInt)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "offset",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.Offset = v.(OptInt)
-		}
-	}
-	return params
-}
-
-func decodeGetAccountInscriptionsParams(args [1]string, argsEscaped bool, r *http.Request) (params GetAccountInscriptionsParams, _ error) {
-	q := uri.NewQueryDecoder(r.URL.Query())
-	// Decode path: account_id.
-	if err := func() error {
-		param := args[0]
-		if argsEscaped {
-			unescaped, err := url.PathUnescape(args[0])
-			if err != nil {
-				return errors.Wrap(err, "unescape path")
-			}
-			param = unescaped
-		}
-		if len(param) > 0 {
-			d := uri.NewPathDecoder(uri.PathDecoderConfig{
-				Param:   "account_id",
-				Value:   param,
-				Style:   uri.PathStyleSimple,
-				Explode: false,
-			})
-
-			if err := func() error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.AccountID = c
-				return nil
-			}(); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "account_id",
-			In:   "path",
-			Err:  err,
-		}
-	}
-	// Set default value for query: limit.
-	{
-		val := int(1000)
-		params.Limit.SetTo(val)
-	}
-	// Decode query: limit.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "limit",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotLimitVal int
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotLimitVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.Limit.SetTo(paramsDotLimitVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.Limit.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        true,
-							Min:           1,
-							MaxSet:        true,
-							Max:           1000,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "limit",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Set default value for query: offset.
-	{
-		val := int(0)
-		params.Offset.SetTo(val)
-	}
-	// Decode query: offset.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "offset",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotOffsetVal int
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotOffsetVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.Offset.SetTo(paramsDotOffsetVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.Offset.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        true,
-							Min:           0,
-							MaxSet:        false,
-							Max:           0,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "offset",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	return params, nil
-}
-
-// GetAccountInscriptionsHistoryParams is parameters of getAccountInscriptionsHistory operation.
-type GetAccountInscriptionsHistoryParams struct {
-	// Account ID.
-	AccountID      string
-	AcceptLanguage OptString
-	// Omit this parameter to get last events.
-	BeforeLt OptInt64
-	Limit    OptInt
-}
-
-func unpackGetAccountInscriptionsHistoryParams(packed middleware.Parameters) (params GetAccountInscriptionsHistoryParams) {
-	{
-		key := middleware.ParameterKey{
-			Name: "account_id",
-			In:   "path",
-		}
-		params.AccountID = packed[key].(string)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "Accept-Language",
-			In:   "header",
-		}
-		if v, ok := packed[key]; ok {
-			params.AcceptLanguage = v.(OptString)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "before_lt",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.BeforeLt = v.(OptInt64)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "limit",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.Limit = v.(OptInt)
-		}
-	}
-	return params
-}
-
-func decodeGetAccountInscriptionsHistoryParams(args [1]string, argsEscaped bool, r *http.Request) (params GetAccountInscriptionsHistoryParams, _ error) {
-	q := uri.NewQueryDecoder(r.URL.Query())
-	h := uri.NewHeaderDecoder(r.Header)
-	// Decode path: account_id.
-	if err := func() error {
-		param := args[0]
-		if argsEscaped {
-			unescaped, err := url.PathUnescape(args[0])
-			if err != nil {
-				return errors.Wrap(err, "unescape path")
-			}
-			param = unescaped
-		}
-		if len(param) > 0 {
-			d := uri.NewPathDecoder(uri.PathDecoderConfig{
-				Param:   "account_id",
-				Value:   param,
-				Style:   uri.PathStyleSimple,
-				Explode: false,
-			})
-
-			if err := func() error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.AccountID = c
-				return nil
-			}(); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "account_id",
-			In:   "path",
-			Err:  err,
-		}
-	}
-	// Set default value for header: Accept-Language.
-	{
-		val := string("en")
-		params.AcceptLanguage.SetTo(val)
-	}
-	// Decode header: Accept-Language.
-	if err := func() error {
-		cfg := uri.HeaderParameterDecodingConfig{
-			Name:    "Accept-Language",
-			Explode: false,
-		}
-		if err := h.HasParam(cfg); err == nil {
-			if err := h.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotAcceptLanguageVal string
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToString(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotAcceptLanguageVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.AcceptLanguage.SetTo(paramsDotAcceptLanguageVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "Accept-Language",
-			In:   "header",
-			Err:  err,
-		}
-	}
-	// Decode query: before_lt.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "before_lt",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotBeforeLtVal int64
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt64(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotBeforeLtVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.BeforeLt.SetTo(paramsDotBeforeLtVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "before_lt",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Set default value for query: limit.
-	{
-		val := int(100)
-		params.Limit.SetTo(val)
-	}
-	// Decode query: limit.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "limit",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotLimitVal int
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotLimitVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.Limit.SetTo(paramsDotLimitVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.Limit.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        true,
-							Min:           1,
-							MaxSet:        true,
-							Max:           1000,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "limit",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	return params, nil
-}
-
-// GetAccountInscriptionsHistoryByTickerParams is parameters of getAccountInscriptionsHistoryByTicker operation.
-type GetAccountInscriptionsHistoryByTickerParams struct {
-	// Account ID.
-	AccountID      string
-	AcceptLanguage OptString
-	Ticker         string
-	// Omit this parameter to get last events.
-	BeforeLt OptInt64
-	Limit    OptInt
-}
-
-func unpackGetAccountInscriptionsHistoryByTickerParams(packed middleware.Parameters) (params GetAccountInscriptionsHistoryByTickerParams) {
-	{
-		key := middleware.ParameterKey{
-			Name: "account_id",
-			In:   "path",
-		}
-		params.AccountID = packed[key].(string)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "Accept-Language",
-			In:   "header",
-		}
-		if v, ok := packed[key]; ok {
-			params.AcceptLanguage = v.(OptString)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "ticker",
-			In:   "path",
-		}
-		params.Ticker = packed[key].(string)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "before_lt",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.BeforeLt = v.(OptInt64)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "limit",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.Limit = v.(OptInt)
-		}
-	}
-	return params
-}
-
-func decodeGetAccountInscriptionsHistoryByTickerParams(args [2]string, argsEscaped bool, r *http.Request) (params GetAccountInscriptionsHistoryByTickerParams, _ error) {
-	q := uri.NewQueryDecoder(r.URL.Query())
-	h := uri.NewHeaderDecoder(r.Header)
-	// Decode path: account_id.
-	if err := func() error {
-		param := args[0]
-		if argsEscaped {
-			unescaped, err := url.PathUnescape(args[0])
-			if err != nil {
-				return errors.Wrap(err, "unescape path")
-			}
-			param = unescaped
-		}
-		if len(param) > 0 {
-			d := uri.NewPathDecoder(uri.PathDecoderConfig{
-				Param:   "account_id",
-				Value:   param,
-				Style:   uri.PathStyleSimple,
-				Explode: false,
-			})
-
-			if err := func() error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.AccountID = c
-				return nil
-			}(); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "account_id",
-			In:   "path",
-			Err:  err,
-		}
-	}
-	// Set default value for header: Accept-Language.
-	{
-		val := string("en")
-		params.AcceptLanguage.SetTo(val)
-	}
-	// Decode header: Accept-Language.
-	if err := func() error {
-		cfg := uri.HeaderParameterDecodingConfig{
-			Name:    "Accept-Language",
-			Explode: false,
-		}
-		if err := h.HasParam(cfg); err == nil {
-			if err := h.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotAcceptLanguageVal string
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToString(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotAcceptLanguageVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.AcceptLanguage.SetTo(paramsDotAcceptLanguageVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "Accept-Language",
-			In:   "header",
-			Err:  err,
-		}
-	}
-	// Decode path: ticker.
-	if err := func() error {
-		param := args[1]
-		if argsEscaped {
-			unescaped, err := url.PathUnescape(args[1])
-			if err != nil {
-				return errors.Wrap(err, "unescape path")
-			}
-			param = unescaped
-		}
-		if len(param) > 0 {
-			d := uri.NewPathDecoder(uri.PathDecoderConfig{
-				Param:   "ticker",
-				Value:   param,
-				Style:   uri.PathStyleSimple,
-				Explode: false,
-			})
-
-			if err := func() error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.Ticker = c
-				return nil
-			}(); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "ticker",
-			In:   "path",
-			Err:  err,
-		}
-	}
-	// Decode query: before_lt.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "before_lt",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotBeforeLtVal int64
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt64(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotBeforeLtVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.BeforeLt.SetTo(paramsDotBeforeLtVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "before_lt",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Set default value for query: limit.
-	{
-		val := int(100)
-		params.Limit.SetTo(val)
-	}
-	// Decode query: limit.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "limit",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotLimitVal int
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotLimitVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.Limit.SetTo(paramsDotLimitVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.Limit.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        true,
-							Min:           1,
-							MaxSet:        true,
-							Max:           1000,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "limit",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	return params, nil
-}
-
 // GetAccountJettonBalanceParams is parameters of getAccountJettonBalance operation.
 type GetAccountJettonBalanceParams struct {
 	// Account ID.
 	AccountID string
 	// Jetton ID.
 	JettonID string
-	// Accept ton and all possible fiat currencies, separated by commas.
-	Currencies []string
+	// Accept gram and all possible fiat currencies, separated by commas.
+	Currencies []string `json:",omitempty"`
 	// Comma separated list supported extensions.
-	SupportedExtensions []string
+	SupportedExtensions []string `json:",omitempty"`
 }
 
 func unpackGetAccountJettonBalanceParams(packed middleware.Parameters) (params GetAccountJettonBalanceParams) {
@@ -3590,12 +3293,12 @@ type GetAccountJettonHistoryByIDParams struct {
 	AccountID string
 	// Jetton ID.
 	JettonID       string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Omit this parameter to get last events.
-	BeforeLt  OptInt64
+	BeforeLt  OptInt64 `json:",omitempty,omitzero"`
 	Limit     int
-	StartDate OptInt64
-	EndDate   OptInt64
+	StartDate OptInt64 `json:",omitempty,omitzero"`
+	EndDate   OptInt64 `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountJettonHistoryByIDParams(packed middleware.Parameters) (params GetAccountJettonHistoryByIDParams) {
@@ -3872,6 +3575,7 @@ func decodeGetAccountJettonHistoryByIDParams(args [2]string, argsEscaped bool, r
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.Limit)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -3880,7 +3584,7 @@ func decodeGetAccountJettonHistoryByIDParams(args [2]string, argsEscaped bool, r
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -3934,6 +3638,7 @@ func decodeGetAccountJettonHistoryByIDParams(args [2]string, argsEscaped bool, r
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -3999,6 +3704,7 @@ func decodeGetAccountJettonHistoryByIDParams(args [2]string, argsEscaped bool, r
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -4027,10 +3733,12 @@ func decodeGetAccountJettonHistoryByIDParams(args [2]string, argsEscaped bool, r
 type GetAccountJettonsBalancesParams struct {
 	// Account ID.
 	AccountID string
-	// Accept ton and all possible fiat currencies, separated by commas.
-	Currencies []string
+	// Accept gram and all possible fiat currencies, separated by commas.
+	Currencies []string `json:",omitempty"`
 	// Comma separated list supported extensions.
-	SupportedExtensions []string
+	SupportedExtensions []string `json:",omitempty"`
+	Limit               OptInt   `json:",omitempty,omitzero"`
+	Offset              OptInt   `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountJettonsBalancesParams(packed middleware.Parameters) (params GetAccountJettonsBalancesParams) {
@@ -4057,6 +3765,24 @@ func unpackGetAccountJettonsBalancesParams(packed middleware.Parameters) (params
 		}
 		if v, ok := packed[key]; ok {
 			params.SupportedExtensions = v.([]string)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "limit",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Limit = v.(OptInt)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "offset",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Offset = v.(OptInt)
 		}
 	}
 	return params
@@ -4195,19 +3921,158 @@ func decodeGetAccountJettonsBalancesParams(args [1]string, argsEscaped bool, r *
 			Err:  err,
 		}
 	}
+	// Set default value for query: limit.
+	{
+		val := int(1000)
+		params.Limit.SetTo(val)
+	}
+	// Decode query: limit.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotLimitVal int
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotLimitVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Limit.SetTo(paramsDotLimitVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.Limit.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        true,
+							Min:           1,
+							MaxSet:        true,
+							Max:           1000,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "limit",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Set default value for query: offset.
+	{
+		val := int(0)
+		params.Offset.SetTo(val)
+	}
+	// Decode query: offset.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "offset",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotOffsetVal int
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotOffsetVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Offset.SetTo(paramsDotOffsetVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.Offset.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        true,
+							Min:           0,
+							MaxSet:        false,
+							Max:           0,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "offset",
+			In:   "query",
+			Err:  err,
+		}
+	}
 	return params, nil
 }
 
 // GetAccountJettonsHistoryParams is parameters of getAccountJettonsHistory operation.
 type GetAccountJettonsHistoryParams struct {
 	// Account ID.
-	AccountID      string
-	AcceptLanguage OptString
+	AccountID string
 	// Omit this parameter to get last events.
-	BeforeLt  OptInt64
-	Limit     int
-	StartDate OptInt64
-	EndDate   OptInt64
+	BeforeLt OptInt64 `json:",omitempty,omitzero"`
+	Limit    int
 }
 
 func unpackGetAccountJettonsHistoryParams(packed middleware.Parameters) (params GetAccountJettonsHistoryParams) {
@@ -4217,15 +4082,6 @@ func unpackGetAccountJettonsHistoryParams(packed middleware.Parameters) (params 
 			In:   "path",
 		}
 		params.AccountID = packed[key].(string)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "Accept-Language",
-			In:   "header",
-		}
-		if v, ok := packed[key]; ok {
-			params.AcceptLanguage = v.(OptString)
-		}
 	}
 	{
 		key := middleware.ParameterKey{
@@ -4243,30 +4099,11 @@ func unpackGetAccountJettonsHistoryParams(packed middleware.Parameters) (params 
 		}
 		params.Limit = packed[key].(int)
 	}
-	{
-		key := middleware.ParameterKey{
-			Name: "start_date",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.StartDate = v.(OptInt64)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "end_date",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.EndDate = v.(OptInt64)
-		}
-	}
 	return params
 }
 
 func decodeGetAccountJettonsHistoryParams(args [1]string, argsEscaped bool, r *http.Request) (params GetAccountJettonsHistoryParams, _ error) {
 	q := uri.NewQueryDecoder(r.URL.Query())
-	h := uri.NewHeaderDecoder(r.Header)
 	// Decode path: account_id.
 	if err := func() error {
 		param := args[0]
@@ -4309,50 +4146,6 @@ func decodeGetAccountJettonsHistoryParams(args [1]string, argsEscaped bool, r *h
 		return params, &ogenerrors.DecodeParamError{
 			Name: "account_id",
 			In:   "path",
-			Err:  err,
-		}
-	}
-	// Set default value for header: Accept-Language.
-	{
-		val := string("en")
-		params.AcceptLanguage.SetTo(val)
-	}
-	// Decode header: Accept-Language.
-	if err := func() error {
-		cfg := uri.HeaderParameterDecodingConfig{
-			Name:    "Accept-Language",
-			Explode: false,
-		}
-		if err := h.HasParam(cfg); err == nil {
-			if err := h.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotAcceptLanguageVal string
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToString(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotAcceptLanguageVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.AcceptLanguage.SetTo(paramsDotAcceptLanguageVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "Accept-Language",
-			In:   "header",
 			Err:  err,
 		}
 	}
@@ -4432,6 +4225,7 @@ func decodeGetAccountJettonsHistoryParams(args [1]string, argsEscaped bool, r *h
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.Limit)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -4440,142 +4234,12 @@ func decodeGetAccountJettonsHistoryParams(args [1]string, argsEscaped bool, r *h
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
 		return params, &ogenerrors.DecodeParamError{
 			Name: "limit",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: start_date.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "start_date",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotStartDateVal int64
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt64(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotStartDateVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.StartDate.SetTo(paramsDotStartDateVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.StartDate.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        false,
-							Min:           0,
-							MaxSet:        true,
-							Max:           2114380800,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "start_date",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: end_date.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "end_date",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotEndDateVal int64
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt64(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotEndDateVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.EndDate.SetTo(paramsDotEndDateVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.EndDate.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        false,
-							Min:           0,
-							MaxSet:        true,
-							Max:           2114380800,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "end_date",
 			In:   "query",
 			Err:  err,
 		}
@@ -4653,12 +4317,10 @@ func decodeGetAccountMultisigsParams(args [1]string, argsEscaped bool, r *http.R
 type GetAccountNftHistoryParams struct {
 	// Account ID.
 	AccountID      string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Omit this parameter to get last events.
-	BeforeLt  OptInt64
-	Limit     int
-	StartDate OptInt64
-	EndDate   OptInt64
+	BeforeLt OptInt64 `json:",omitempty,omitzero"`
+	Limit    int
 }
 
 func unpackGetAccountNftHistoryParams(packed middleware.Parameters) (params GetAccountNftHistoryParams) {
@@ -4693,24 +4355,6 @@ func unpackGetAccountNftHistoryParams(packed middleware.Parameters) (params GetA
 			In:   "query",
 		}
 		params.Limit = packed[key].(int)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "start_date",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.StartDate = v.(OptInt64)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "end_date",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.EndDate = v.(OptInt64)
-		}
 	}
 	return params
 }
@@ -4883,6 +4527,7 @@ func decodeGetAccountNftHistoryParams(args [1]string, argsEscaped bool, r *http.
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.Limit)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -4891,142 +4536,12 @@ func decodeGetAccountNftHistoryParams(args [1]string, argsEscaped bool, r *http.
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
 		return params, &ogenerrors.DecodeParamError{
 			Name: "limit",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: start_date.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "start_date",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotStartDateVal int64
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt64(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotStartDateVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.StartDate.SetTo(paramsDotStartDateVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.StartDate.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        false,
-							Min:           0,
-							MaxSet:        true,
-							Max:           2114380800,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "start_date",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: end_date.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "end_date",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotEndDateVal int64
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToInt64(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotEndDateVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.EndDate.SetTo(paramsDotEndDateVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if value, ok := params.EndDate.Get(); ok {
-					if err := func() error {
-						if err := (validate.Int{
-							MinSet:        false,
-							Min:           0,
-							MaxSet:        true,
-							Max:           2114380800,
-							MinExclusive:  false,
-							MaxExclusive:  false,
-							MultipleOfSet: false,
-							MultipleOf:    0,
-						}).Validate(int64(value)); err != nil {
-							return errors.Wrap(err, "int")
-						}
-						return nil
-					}(); err != nil {
-						return err
-					}
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "end_date",
 			In:   "query",
 			Err:  err,
 		}
@@ -5039,12 +4554,12 @@ type GetAccountNftItemsParams struct {
 	// Account ID.
 	AccountID string
 	// Nft collection.
-	Collection OptString
-	Limit      OptInt
-	Offset     OptInt
-	// Selling nft items in ton implemented usually via transfer items to special selling account. This
+	Collection OptString `json:",omitempty,omitzero"`
+	Limit      OptInt    `json:",omitempty,omitzero"`
+	Offset     OptInt    `json:",omitempty,omitzero"`
+	// Selling nft items in TON implemented usually via transfer items to special selling account. This
 	// option enables including items which owned not directly.
-	IndirectOwnership OptBool
+	IndirectOwnership OptBool `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountNftItemsParams(packed middleware.Parameters) (params GetAccountNftItemsParams) {
@@ -5231,6 +4746,7 @@ func decodeGetAccountNftItemsParams(args [1]string, argsEscaped bool, r *http.Re
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -5301,6 +4817,7 @@ func decodeGetAccountNftItemsParams(args [1]string, argsEscaped bool, r *http.Re
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -5640,8 +5157,8 @@ type GetAccountTracesParams struct {
 	// Account ID.
 	AccountID string
 	// Omit this parameter to get last events.
-	BeforeLt OptInt64
-	Limit    OptInt
+	BeforeLt OptInt64 `json:",omitempty,omitzero"`
+	Limit    OptInt   `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountTracesParams(packed middleware.Parameters) (params GetAccountTracesParams) {
@@ -5810,6 +5327,7 @@ func decodeGetAccountTracesParams(args [1]string, argsEscaped bool, r *http.Requ
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -5836,7 +5354,7 @@ func decodeGetAccountTracesParams(args [1]string, argsEscaped bool, r *http.Requ
 
 // GetAccountsParams is parameters of getAccounts operation.
 type GetAccountsParams struct {
-	Currency OptString
+	Currency OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetAccountsParams(packed middleware.Parameters) (params GetAccountsParams) {
@@ -5901,7 +5419,7 @@ func decodeGetAccountsParams(args [0]string, argsEscaped bool, r *http.Request) 
 // GetAllAuctionsParams is parameters of getAllAuctions operation.
 type GetAllAuctionsParams struct {
 	// Domain filter for current auctions "ton" or "t.me".
-	Tld OptString
+	Tld OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetAllAuctionsParams(packed middleware.Parameters) (params GetAllAuctionsParams) {
@@ -6034,11 +5552,11 @@ type GetBlockchainAccountTransactionsParams struct {
 	// Account ID.
 	AccountID string
 	// Omit this parameter to get last transactions.
-	AfterLt OptInt64
+	AfterLt OptInt64 `json:",omitempty,omitzero"`
 	// Omit this parameter to get last transactions.
-	BeforeLt  OptInt64
-	Limit     OptInt32
-	SortOrder OptGetBlockchainAccountTransactionsSortOrder
+	BeforeLt  OptInt64                                     `json:",omitempty,omitzero"`
+	Limit     OptInt32                                     `json:",omitempty,omitzero"`
+	SortOrder OptGetBlockchainAccountTransactionsSortOrder `json:",omitempty,omitzero"`
 }
 
 func unpackGetBlockchainAccountTransactionsParams(packed middleware.Parameters) (params GetBlockchainAccountTransactionsParams) {
@@ -6266,6 +5784,7 @@ func decodeGetBlockchainAccountTransactionsParams(args [1]string, argsEscaped bo
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -6685,6 +6204,8 @@ func decodeGetBlockchainMasterchainShardsParams(args [1]string, argsEscaped bool
 type GetBlockchainMasterchainTransactionsParams struct {
 	// Masterchain block seqno.
 	MasterchainSeqno int32
+	Offset           OptInt `json:",omitempty,omitzero"`
+	Limit            OptInt `json:",omitempty,omitzero"`
 }
 
 func unpackGetBlockchainMasterchainTransactionsParams(packed middleware.Parameters) (params GetBlockchainMasterchainTransactionsParams) {
@@ -6695,10 +6216,29 @@ func unpackGetBlockchainMasterchainTransactionsParams(packed middleware.Paramete
 		}
 		params.MasterchainSeqno = packed[key].(int32)
 	}
+	{
+		key := middleware.ParameterKey{
+			Name: "offset",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Offset = v.(OptInt)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "limit",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Limit = v.(OptInt)
+		}
+	}
 	return params
 }
 
 func decodeGetBlockchainMasterchainTransactionsParams(args [1]string, argsEscaped bool, r *http.Request) (params GetBlockchainMasterchainTransactionsParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
 	// Decode path: masterchain_seqno.
 	if err := func() error {
 		param := args[0]
@@ -6741,6 +6281,143 @@ func decodeGetBlockchainMasterchainTransactionsParams(args [1]string, argsEscape
 		return params, &ogenerrors.DecodeParamError{
 			Name: "masterchain_seqno",
 			In:   "path",
+			Err:  err,
+		}
+	}
+	// Set default value for query: offset.
+	{
+		val := int(0)
+		params.Offset.SetTo(val)
+	}
+	// Decode query: offset.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "offset",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotOffsetVal int
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotOffsetVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Offset.SetTo(paramsDotOffsetVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.Offset.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        true,
+							Min:           0,
+							MaxSet:        false,
+							Max:           0,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "offset",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: limit.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotLimitVal int
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotLimitVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Limit.SetTo(paramsDotLimitVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.Limit.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        true,
+							Min:           1,
+							MaxSet:        false,
+							Max:           0,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "limit",
+			In:   "query",
 			Err:  err,
 		}
 	}
@@ -6949,10 +6626,10 @@ func decodeGetBlockchainTransactionByMessageHashParams(args [1]string, argsEscap
 type GetChartRatesParams struct {
 	// Accept jetton master address.
 	Token       string
-	Currency    OptString
-	StartDate   OptInt64
-	EndDate     OptInt64
-	PointsCount OptInt
+	Currency    OptString `json:",omitempty,omitzero"`
+	StartDate   OptInt64  `json:",omitempty,omitzero"`
+	EndDate     OptInt64  `json:",omitempty,omitzero"`
+	PointsCount OptInt    `json:",omitempty,omitzero"`
 }
 
 func unpackGetChartRatesParams(packed middleware.Parameters) (params GetChartRatesParams) {
@@ -7030,7 +6707,7 @@ func decodeGetChartRatesParams(args [0]string, argsEscaped bool, r *http.Request
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -7125,6 +6802,7 @@ func decodeGetChartRatesParams(args [0]string, argsEscaped bool, r *http.Request
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -7190,6 +6868,7 @@ func decodeGetChartRatesParams(args [0]string, argsEscaped bool, r *http.Request
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -7260,6 +6939,7 @@ func decodeGetChartRatesParams(args [0]string, argsEscaped bool, r *http.Request
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -7420,7 +7100,7 @@ func decodeGetDomainBidsParams(args [1]string, argsEscaped bool, r *http.Request
 type GetEventParams struct {
 	// Event ID or transaction hash in hex (without 0x) or base64url format.
 	EventID        string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetEventParams(packed middleware.Parameters) (params GetEventParams) {
@@ -7603,363 +7283,12 @@ func decodeGetExtraCurrencyInfoParams(args [1]string, argsEscaped bool, r *http.
 	return params, nil
 }
 
-// GetInscriptionOpTemplateParams is parameters of getInscriptionOpTemplate operation.
-type GetInscriptionOpTemplateParams struct {
-	Type        GetInscriptionOpTemplateType
-	Destination OptString
-	Comment     OptString
-	Operation   GetInscriptionOpTemplateOperation
-	Amount      string
-	Ticker      string
-	Who         string
-}
-
-func unpackGetInscriptionOpTemplateParams(packed middleware.Parameters) (params GetInscriptionOpTemplateParams) {
-	{
-		key := middleware.ParameterKey{
-			Name: "type",
-			In:   "query",
-		}
-		params.Type = packed[key].(GetInscriptionOpTemplateType)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "destination",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.Destination = v.(OptString)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "comment",
-			In:   "query",
-		}
-		if v, ok := packed[key]; ok {
-			params.Comment = v.(OptString)
-		}
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "operation",
-			In:   "query",
-		}
-		params.Operation = packed[key].(GetInscriptionOpTemplateOperation)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "amount",
-			In:   "query",
-		}
-		params.Amount = packed[key].(string)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "ticker",
-			In:   "query",
-		}
-		params.Ticker = packed[key].(string)
-	}
-	{
-		key := middleware.ParameterKey{
-			Name: "who",
-			In:   "query",
-		}
-		params.Who = packed[key].(string)
-	}
-	return params
-}
-
-func decodeGetInscriptionOpTemplateParams(args [0]string, argsEscaped bool, r *http.Request) (params GetInscriptionOpTemplateParams, _ error) {
-	q := uri.NewQueryDecoder(r.URL.Query())
-	// Decode query: type.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "type",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.Type = GetInscriptionOpTemplateType(c)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if err := params.Type.Validate(); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "type",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: destination.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "destination",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotDestinationVal string
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToString(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotDestinationVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.Destination.SetTo(paramsDotDestinationVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "destination",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: comment.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "comment",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				var paramsDotCommentVal string
-				if err := func() error {
-					val, err := d.DecodeValue()
-					if err != nil {
-						return err
-					}
-
-					c, err := conv.ToString(val)
-					if err != nil {
-						return err
-					}
-
-					paramsDotCommentVal = c
-					return nil
-				}(); err != nil {
-					return err
-				}
-				params.Comment.SetTo(paramsDotCommentVal)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "comment",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: operation.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "operation",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.Operation = GetInscriptionOpTemplateOperation(c)
-				return nil
-			}); err != nil {
-				return err
-			}
-			if err := func() error {
-				if err := params.Operation.Validate(); err != nil {
-					return err
-				}
-				return nil
-			}(); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "operation",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: amount.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "amount",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.Amount = c
-				return nil
-			}); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "amount",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: ticker.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "ticker",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.Ticker = c
-				return nil
-			}); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "ticker",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	// Decode query: who.
-	if err := func() error {
-		cfg := uri.QueryParameterDecodingConfig{
-			Name:    "who",
-			Style:   uri.QueryStyleForm,
-			Explode: true,
-		}
-
-		if err := q.HasParam(cfg); err == nil {
-			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
-				val, err := d.DecodeValue()
-				if err != nil {
-					return err
-				}
-
-				c, err := conv.ToString(val)
-				if err != nil {
-					return err
-				}
-
-				params.Who = c
-				return nil
-			}); err != nil {
-				return err
-			}
-		} else {
-			return validate.ErrFieldRequired
-		}
-		return nil
-	}(); err != nil {
-		return params, &ogenerrors.DecodeParamError{
-			Name: "who",
-			In:   "query",
-			Err:  err,
-		}
-	}
-	return params, nil
-}
-
 // GetItemsFromCollectionParams is parameters of getItemsFromCollection operation.
 type GetItemsFromCollectionParams struct {
 	// Account ID.
 	AccountID string
-	Limit     OptInt
-	Offset    OptInt
+	Limit     OptInt `json:",omitempty,omitzero"`
+	Offset    OptInt `json:",omitempty,omitzero"`
 }
 
 func unpackGetItemsFromCollectionParams(packed middleware.Parameters) (params GetItemsFromCollectionParams) {
@@ -8087,6 +7416,7 @@ func decodeGetItemsFromCollectionParams(args [1]string, argsEscaped bool, r *htt
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -8157,6 +7487,7 @@ func decodeGetItemsFromCollectionParams(args [1]string, argsEscaped bool, r *htt
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -8181,12 +7512,404 @@ func decodeGetItemsFromCollectionParams(args [1]string, argsEscaped bool, r *htt
 	return params, nil
 }
 
+// GetJettonAccountHistoryByIDParams is parameters of getJettonAccountHistoryByID operation.
+type GetJettonAccountHistoryByIDParams struct {
+	// Account ID.
+	AccountID string
+	// Jetton ID.
+	JettonID string
+	// Omit this parameter to get last events.
+	BeforeLt  OptInt64 `json:",omitempty,omitzero"`
+	Limit     int
+	StartDate OptInt64 `json:",omitempty,omitzero"`
+	EndDate   OptInt64 `json:",omitempty,omitzero"`
+}
+
+func unpackGetJettonAccountHistoryByIDParams(packed middleware.Parameters) (params GetJettonAccountHistoryByIDParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "account_id",
+			In:   "path",
+		}
+		params.AccountID = packed[key].(string)
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "jetton_id",
+			In:   "path",
+		}
+		params.JettonID = packed[key].(string)
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "before_lt",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.BeforeLt = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "limit",
+			In:   "query",
+		}
+		params.Limit = packed[key].(int)
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "start_date",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.StartDate = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "end_date",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.EndDate = v.(OptInt64)
+		}
+	}
+	return params
+}
+
+func decodeGetJettonAccountHistoryByIDParams(args [2]string, argsEscaped bool, r *http.Request) (params GetJettonAccountHistoryByIDParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode path: account_id.
+	if err := func() error {
+		param := args[1]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[1])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "account_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.AccountID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "account_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	// Decode path: jetton_id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "jetton_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.JettonID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "jetton_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	// Decode query: before_lt.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "before_lt",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotBeforeLtVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotBeforeLtVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.BeforeLt.SetTo(paramsDotBeforeLtVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "before_lt",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: limit.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToInt(val)
+				if err != nil {
+					return err
+				}
+
+				params.Limit = c
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if err := (validate.Int{
+					MinSet:        true,
+					Min:           1,
+					MaxSet:        true,
+					Max:           1000,
+					MinExclusive:  false,
+					MaxExclusive:  false,
+					MultipleOfSet: false,
+					MultipleOf:    0,
+					Pattern:       nil,
+				}).Validate(int64(params.Limit)); err != nil {
+					return errors.Wrap(err, "int")
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "limit",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: start_date.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "start_date",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotStartDateVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotStartDateVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.StartDate.SetTo(paramsDotStartDateVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.StartDate.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        false,
+							Min:           0,
+							MaxSet:        true,
+							Max:           2114380800,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "start_date",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: end_date.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "end_date",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotEndDateVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotEndDateVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.EndDate.SetTo(paramsDotEndDateVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.EndDate.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        false,
+							Min:           0,
+							MaxSet:        true,
+							Max:           2114380800,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "end_date",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // GetJettonHoldersParams is parameters of getJettonHolders operation.
 type GetJettonHoldersParams struct {
 	// Account ID.
 	AccountID string
-	Limit     OptInt
-	Offset    OptInt
+	Limit     OptInt `json:",omitempty,omitzero"`
+	// Used only with sort_by=balance; has limit of 9000 rows.
+	Offset OptInt                    `json:",omitempty,omitzero"`
+	SortBy OptGetJettonHoldersSortBy `json:",omitempty,omitzero"`
+	// Used only with sort_by=address: the account_id of the last holder from the previous page, to fetch
+	// the next page after it.
+	LastAccountID OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetJettonHoldersParams(packed middleware.Parameters) (params GetJettonHoldersParams) {
@@ -8213,6 +7936,24 @@ func unpackGetJettonHoldersParams(packed middleware.Parameters) (params GetJetto
 		}
 		if v, ok := packed[key]; ok {
 			params.Offset = v.(OptInt)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "sort_by",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.SortBy = v.(OptGetJettonHoldersSortBy)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "last_account_id",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.LastAccountID = v.(OptString)
 		}
 	}
 	return params
@@ -8314,6 +8055,7 @@ func decodeGetJettonHoldersParams(args [1]string, argsEscaped bool, r *http.Requ
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -8384,6 +8126,7 @@ func decodeGetJettonHoldersParams(args [1]string, argsEscaped bool, r *http.Requ
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -8401,6 +8144,108 @@ func decodeGetJettonHoldersParams(args [1]string, argsEscaped bool, r *http.Requ
 	}(); err != nil {
 		return params, &ogenerrors.DecodeParamError{
 			Name: "offset",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Set default value for query: sort_by.
+	{
+		val := GetJettonHoldersSortBy("balance")
+		params.SortBy.SetTo(val)
+	}
+	// Decode query: sort_by.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "sort_by",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotSortByVal GetJettonHoldersSortBy
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotSortByVal = GetJettonHoldersSortBy(c)
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.SortBy.SetTo(paramsDotSortByVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.SortBy.Get(); ok {
+					if err := func() error {
+						if err := value.Validate(); err != nil {
+							return err
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "sort_by",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: last_account_id.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "last_account_id",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotLastAccountIDVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotLastAccountIDVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.LastAccountID.SetTo(paramsDotLastAccountIDVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "last_account_id",
 			In:   "query",
 			Err:  err,
 		}
@@ -8596,8 +8441,13 @@ func decodeGetJettonTransferPayloadParams(args [2]string, argsEscaped bool, r *h
 
 // GetJettonsParams is parameters of getJettons operation.
 type GetJettonsParams struct {
-	Limit  OptInt32
-	Offset OptInt32
+	Limit OptInt32 `json:",omitempty,omitzero"`
+	// Deprecated: pagination is based on a daily snapshot, so some new jettons may not appear yet. Use
+	// `last_account_id` for real-time pagination instead.
+	Offset OptInt32 `json:",omitempty,omitzero"`
+	// Cursor for pagination, always resolved live. Pass the `metadata.address` of the last jetton master
+	// from the previous page to get the next page. Preferred over `offset`.
+	LastAccountID OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetJettonsParams(packed middleware.Parameters) (params GetJettonsParams) {
@@ -8617,6 +8467,15 @@ func unpackGetJettonsParams(packed middleware.Parameters) (params GetJettonsPara
 		}
 		if v, ok := packed[key]; ok {
 			params.Offset = v.(OptInt32)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "last_account_id",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.LastAccountID = v.(OptString)
 		}
 	}
 	return params
@@ -8673,6 +8532,7 @@ func decodeGetJettonsParams(args [0]string, argsEscaped bool, r *http.Request) (
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -8743,6 +8603,7 @@ func decodeGetJettonsParams(args [0]string, argsEscaped bool, r *http.Request) (
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -8764,6 +8625,47 @@ func decodeGetJettonsParams(args [0]string, argsEscaped bool, r *http.Request) (
 			Err:  err,
 		}
 	}
+	// Decode query: last_account_id.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "last_account_id",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotLastAccountIDVal string
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToString(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotLastAccountIDVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.LastAccountID.SetTo(paramsDotLastAccountIDVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "last_account_id",
+			In:   "query",
+			Err:  err,
+		}
+	}
 	return params, nil
 }
 
@@ -8771,7 +8673,7 @@ func decodeGetJettonsParams(args [0]string, argsEscaped bool, r *http.Request) (
 type GetJettonsEventsParams struct {
 	// Event ID or transaction hash in hex (without 0x) or base64url format.
 	EventID        string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetJettonsEventsParams(packed middleware.Parameters) (params GetJettonsEventsParams) {
@@ -8888,6 +8790,139 @@ func decodeGetJettonsEventsParams(args [1]string, argsEscaped bool, r *http.Requ
 	return params, nil
 }
 
+// GetLibraryByHashParams is parameters of getLibraryByHash operation.
+type GetLibraryByHashParams struct {
+	// Hash in hex (without 0x) format.
+	Hash string
+}
+
+func unpackGetLibraryByHashParams(packed middleware.Parameters) (params GetLibraryByHashParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "hash",
+			In:   "path",
+		}
+		params.Hash = packed[key].(string)
+	}
+	return params
+}
+
+func decodeGetLibraryByHashParams(args [1]string, argsEscaped bool, r *http.Request) (params GetLibraryByHashParams, _ error) {
+	// Decode path: hash.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "hash",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.Hash = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "hash",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// GetMigrationWalletsParams is parameters of getMigrationWallets operation.
+type GetMigrationWalletsParams struct {
+	// Accept gram and all possible fiat currencies, separated by commas.
+	Currencies []string `json:",omitempty"`
+}
+
+func unpackGetMigrationWalletsParams(packed middleware.Parameters) (params GetMigrationWalletsParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "currencies",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Currencies = v.([]string)
+		}
+	}
+	return params
+}
+
+func decodeGetMigrationWalletsParams(args [0]string, argsEscaped bool, r *http.Request) (params GetMigrationWalletsParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: currencies.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "currencies",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				return d.DecodeArray(func(d uri.Decoder) error {
+					var paramsDotCurrenciesVal string
+					if err := func() error {
+						val, err := d.DecodeValue()
+						if err != nil {
+							return err
+						}
+
+						c, err := conv.ToString(val)
+						if err != nil {
+							return err
+						}
+
+						paramsDotCurrenciesVal = c
+						return nil
+					}(); err != nil {
+						return err
+					}
+					params.Currencies = append(params.Currencies, paramsDotCurrenciesVal)
+					return nil
+				})
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "currencies",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // GetMultisigAccountParams is parameters of getMultisigAccount operation.
 type GetMultisigAccountParams struct {
 	// Account ID.
@@ -8906,6 +8941,72 @@ func unpackGetMultisigAccountParams(packed middleware.Parameters) (params GetMul
 }
 
 func decodeGetMultisigAccountParams(args [1]string, argsEscaped bool, r *http.Request) (params GetMultisigAccountParams, _ error) {
+	// Decode path: account_id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "account_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.AccountID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "account_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// GetMultisigOrderParams is parameters of getMultisigOrder operation.
+type GetMultisigOrderParams struct {
+	// Account ID.
+	AccountID string
+}
+
+func unpackGetMultisigOrderParams(packed middleware.Parameters) (params GetMultisigOrderParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "account_id",
+			In:   "path",
+		}
+		params.AccountID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeGetMultisigOrderParams(args [1]string, argsEscaped bool, r *http.Request) (params GetMultisigOrderParams, _ error) {
 	// Decode path: account_id.
 	if err := func() error {
 		param := args[0]
@@ -9022,8 +9123,8 @@ func decodeGetNftCollectionParams(args [1]string, argsEscaped bool, r *http.Requ
 
 // GetNftCollectionsParams is parameters of getNftCollections operation.
 type GetNftCollectionsParams struct {
-	Limit  OptInt32
-	Offset OptInt32
+	Limit  OptInt32 `json:",omitempty,omitzero"`
+	Offset OptInt32 `json:",omitempty,omitzero"`
 }
 
 func unpackGetNftCollectionsParams(packed middleware.Parameters) (params GetNftCollectionsParams) {
@@ -9099,6 +9200,7 @@ func decodeGetNftCollectionsParams(args [0]string, argsEscaped bool, r *http.Req
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -9169,6 +9271,7 @@ func decodeGetNftCollectionsParams(args [0]string, argsEscaped bool, r *http.Req
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -9197,12 +9300,12 @@ func decodeGetNftCollectionsParams(args [0]string, argsEscaped bool, r *http.Req
 type GetNftHistoryByIDParams struct {
 	// Account ID.
 	AccountID      string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 	// Omit this parameter to get last events.
-	BeforeLt  OptInt64
+	BeforeLt  OptInt64 `json:",omitempty,omitzero"`
 	Limit     int
-	StartDate OptInt64
-	EndDate   OptInt64
+	StartDate OptInt64 `json:",omitempty,omitzero"`
+	EndDate   OptInt64 `json:",omitempty,omitzero"`
 }
 
 func unpackGetNftHistoryByIDParams(packed middleware.Parameters) (params GetNftHistoryByIDParams) {
@@ -9427,6 +9530,7 @@ func decodeGetNftHistoryByIDParams(args [1]string, argsEscaped bool, r *http.Req
 					MaxExclusive:  false,
 					MultipleOfSet: false,
 					MultipleOf:    0,
+					Pattern:       nil,
 				}).Validate(int64(params.Limit)); err != nil {
 					return errors.Wrap(err, "int")
 				}
@@ -9435,7 +9539,7 @@ func decodeGetNftHistoryByIDParams(args [1]string, argsEscaped bool, r *http.Req
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -9489,6 +9593,7 @@ func decodeGetNftHistoryByIDParams(args [1]string, argsEscaped bool, r *http.Req
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -9554,6 +9659,7 @@ func decodeGetNftHistoryByIDParams(args [1]string, argsEscaped bool, r *http.Req
 							MaxExclusive:  false,
 							MultipleOfSet: false,
 							MultipleOf:    0,
+							Pattern:       nil,
 						}).Validate(int64(value)); err != nil {
 							return errors.Wrap(err, "int")
 						}
@@ -9644,12 +9750,212 @@ func decodeGetNftItemByAddressParams(args [1]string, argsEscaped bool, r *http.R
 	return params, nil
 }
 
+// GetPurchaseHistoryParams is parameters of getPurchaseHistory operation.
+type GetPurchaseHistoryParams struct {
+	// Account ID.
+	AccountID string
+	// Omit this parameter to get last invoices.
+	BeforeLt OptInt64 `json:",omitempty,omitzero"`
+	Limit    OptInt   `json:",omitempty,omitzero"`
+}
+
+func unpackGetPurchaseHistoryParams(packed middleware.Parameters) (params GetPurchaseHistoryParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "account_id",
+			In:   "path",
+		}
+		params.AccountID = packed[key].(string)
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "before_lt",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.BeforeLt = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "limit",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Limit = v.(OptInt)
+		}
+	}
+	return params
+}
+
+func decodeGetPurchaseHistoryParams(args [1]string, argsEscaped bool, r *http.Request) (params GetPurchaseHistoryParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode path: account_id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "account_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.AccountID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "account_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	// Decode query: before_lt.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "before_lt",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotBeforeLtVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotBeforeLtVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.BeforeLt.SetTo(paramsDotBeforeLtVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "before_lt",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Set default value for query: limit.
+	{
+		val := int(100)
+		params.Limit.SetTo(val)
+	}
+	// Decode query: limit.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotLimitVal int
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotLimitVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Limit.SetTo(paramsDotLimitVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.Limit.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        true,
+							Min:           1,
+							MaxSet:        true,
+							Max:           1000,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "limit",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // GetRatesParams is parameters of getRates operation.
 type GetRatesParams struct {
-	// Accept ton and jetton master addresses, separated by commas.
-	Tokens []string
-	// Accept ton and all possible fiat currencies, separated by commas.
-	Currencies []string
+	// Accept gram and jetton master addresses, separated by commas.
+	Tokens []string `json:",omitempty"`
+	// Accept gram and all possible fiat currencies, separated by commas.
+	Currencies []string `json:",omitempty"`
 }
 
 func unpackGetRatesParams(packed middleware.Parameters) (params GetRatesParams) {
@@ -9723,7 +10029,7 @@ func decodeGetRatesParams(args [0]string, argsEscaped bool, r *http.Request) (pa
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -9784,7 +10090,7 @@ func decodeGetRatesParams(args [0]string, argsEscaped bool, r *http.Request) (pa
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -9802,7 +10108,7 @@ type GetRawAccountStateParams struct {
 	// Account ID.
 	AccountID string
 	// Target block: (workchain,shard,seqno,root_hash,file_hash).
-	TargetBlock OptString
+	TargetBlock OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetRawAccountStateParams(packed middleware.Parameters) (params GetRawAccountStateParams) {
@@ -9921,7 +10227,7 @@ type GetRawBlockProofParams struct {
 	// Known block: (workchain,shard,seqno,root_hash,file_hash).
 	KnownBlock string
 	// Target block: (workchain,shard,seqno,root_hash,file_hash).
-	TargetBlock OptString
+	TargetBlock OptString `json:",omitempty,omitzero"`
 	// Mode.
 	Mode int32
 }
@@ -9981,7 +10287,7 @@ func decodeGetRawBlockProofParams(args [0]string, argsEscaped bool, r *http.Requ
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -10058,7 +10364,7 @@ func decodeGetRawBlockProofParams(args [0]string, argsEscaped bool, r *http.Requ
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -10236,7 +10542,7 @@ func decodeGetRawBlockchainBlockHeaderParams(args [1]string, argsEscaped bool, r
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -10480,7 +10786,7 @@ func decodeGetRawConfigParams(args [1]string, argsEscaped bool, r *http.Request)
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -10502,9 +10808,9 @@ type GetRawListBlockTransactionsParams struct {
 	// Count.
 	Count int32
 	// Account ID.
-	AccountID OptString
+	AccountID OptString `json:",omitempty,omitzero"`
 	// Lt.
-	Lt OptInt64
+	Lt OptInt64 `json:",omitempty,omitzero"`
 }
 
 func unpackGetRawListBlockTransactionsParams(packed middleware.Parameters) (params GetRawListBlockTransactionsParams) {
@@ -10623,7 +10929,7 @@ func decodeGetRawListBlockTransactionsParams(args [1]string, argsEscaped bool, r
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -10659,7 +10965,7 @@ func decodeGetRawListBlockTransactionsParams(args [1]string, argsEscaped bool, r
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -10799,7 +11105,7 @@ func decodeGetRawMasterchainInfoExtParams(args [0]string, argsEscaped bool, r *h
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -10995,7 +11301,7 @@ func decodeGetRawShardInfoParams(args [1]string, argsEscaped bool, r *http.Reque
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11031,7 +11337,7 @@ func decodeGetRawShardInfoParams(args [1]string, argsEscaped bool, r *http.Reque
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11067,7 +11373,7 @@ func decodeGetRawShardInfoParams(args [1]string, argsEscaped bool, r *http.Reque
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11197,7 +11503,7 @@ func decodeGetRawTransactionsParams(args [1]string, argsEscaped bool, r *http.Re
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11233,7 +11539,7 @@ func decodeGetRawTransactionsParams(args [1]string, argsEscaped bool, r *http.Re
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11269,7 +11575,7 @@ func decodeGetRawTransactionsParams(args [1]string, argsEscaped bool, r *http.Re
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11334,7 +11640,7 @@ func decodeGetReducedBlockchainBlocksParams(args [0]string, argsEscaped bool, r 
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11370,7 +11676,7 @@ func decodeGetReducedBlockchainBlocksParams(args [0]string, argsEscaped bool, r 
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {
@@ -11383,10 +11689,243 @@ func decodeGetReducedBlockchainBlocksParams(args [0]string, argsEscaped bool, r 
 	return params, nil
 }
 
+// GetRoundRewardsParams is parameters of getRoundRewards operation.
+type GetRoundRewardsParams struct {
+	// Election ID of the finished round. Mutually exclusive with `block` and `unixtime`.
+	ElectionID OptInt64 `json:",omitempty,omitzero"`
+	// Masterchain block seqno within the finished round. Mutually exclusive with `election_id` and
+	// `unixtime`.
+	Block OptUint32 `json:",omitempty,omitzero"`
+	// Unix timestamp (seconds). Looks up the masterchain block at this time and uses it as the anchor.
+	// Mutually exclusive with `election_id` and `block`.
+	Unixtime OptUint32 `json:",omitempty,omitzero"`
+	// Set to `1` to return only basic validator info (rank, pubkey, effective_stake, weight, reward,
+	// pool). Skips pool type detection, owner/validator addresses, nominator data, and returned-stake
+	// lookup — significantly faster.
+	Shallow OptBool `json:",omitempty,omitzero"`
+}
+
+func unpackGetRoundRewardsParams(packed middleware.Parameters) (params GetRoundRewardsParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "election_id",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.ElectionID = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "block",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Block = v.(OptUint32)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "unixtime",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Unixtime = v.(OptUint32)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "shallow",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Shallow = v.(OptBool)
+		}
+	}
+	return params
+}
+
+func decodeGetRoundRewardsParams(args [0]string, argsEscaped bool, r *http.Request) (params GetRoundRewardsParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: election_id.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "election_id",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotElectionIDVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotElectionIDVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.ElectionID.SetTo(paramsDotElectionIDVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "election_id",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: block.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "block",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotBlockVal uint32
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToUint32(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotBlockVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Block.SetTo(paramsDotBlockVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "block",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: unixtime.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "unixtime",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotUnixtimeVal uint32
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToUint32(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotUnixtimeVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Unixtime.SetTo(paramsDotUnixtimeVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "unixtime",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Set default value for query: shallow.
+	{
+		val := bool(false)
+		params.Shallow.SetTo(val)
+	}
+	// Decode query: shallow.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "shallow",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotShallowVal bool
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToBool(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotShallowVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Shallow.SetTo(paramsDotShallowVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "shallow",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // GetStakingPoolHistoryParams is parameters of getStakingPoolHistory operation.
 type GetStakingPoolHistoryParams struct {
 	// Account ID.
 	AccountID string
+	// Omit this parameter to get last log entries.
+	BeforeLt OptInt64 `json:",omitempty,omitzero"`
+	Limit    OptInt32 `json:",omitempty,omitzero"`
 }
 
 func unpackGetStakingPoolHistoryParams(packed middleware.Parameters) (params GetStakingPoolHistoryParams) {
@@ -11397,10 +11936,29 @@ func unpackGetStakingPoolHistoryParams(packed middleware.Parameters) (params Get
 		}
 		params.AccountID = packed[key].(string)
 	}
+	{
+		key := middleware.ParameterKey{
+			Name: "before_lt",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.BeforeLt = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "limit",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Limit = v.(OptInt32)
+		}
+	}
 	return params
 }
 
 func decodeGetStakingPoolHistoryParams(args [1]string, argsEscaped bool, r *http.Request) (params GetStakingPoolHistoryParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
 	// Decode path: account_id.
 	if err := func() error {
 		param := args[0]
@@ -11446,6 +12004,118 @@ func decodeGetStakingPoolHistoryParams(args [1]string, argsEscaped bool, r *http
 			Err:  err,
 		}
 	}
+	// Decode query: before_lt.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "before_lt",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotBeforeLtVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotBeforeLtVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.BeforeLt.SetTo(paramsDotBeforeLtVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "before_lt",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Set default value for query: limit.
+	{
+		val := int32(100)
+		params.Limit.SetTo(val)
+	}
+	// Decode query: limit.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotLimitVal int32
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt32(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotLimitVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Limit.SetTo(paramsDotLimitVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+			if err := func() error {
+				if value, ok := params.Limit.Get(); ok {
+					if err := func() error {
+						if err := (validate.Int{
+							MinSet:        true,
+							Min:           1,
+							MaxSet:        true,
+							Max:           100,
+							MinExclusive:  false,
+							MaxExclusive:  false,
+							MultipleOfSet: false,
+							MultipleOf:    0,
+							Pattern:       nil,
+						}).Validate(int64(value)); err != nil {
+							return errors.Wrap(err, "int")
+						}
+						return nil
+					}(); err != nil {
+						return err
+					}
+				}
+				return nil
+			}(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "limit",
+			In:   "query",
+			Err:  err,
+		}
+	}
 	return params, nil
 }
 
@@ -11453,7 +12123,7 @@ func decodeGetStakingPoolHistoryParams(args [1]string, argsEscaped bool, r *http
 type GetStakingPoolInfoParams struct {
 	// Account ID.
 	AccountID      string
-	AcceptLanguage OptString
+	AcceptLanguage OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetStakingPoolInfoParams(packed middleware.Parameters) (params GetStakingPoolInfoParams) {
@@ -11573,10 +12243,10 @@ func decodeGetStakingPoolInfoParams(args [1]string, argsEscaped bool, r *http.Re
 // GetStakingPoolsParams is parameters of getStakingPools operation.
 type GetStakingPoolsParams struct {
 	// Account ID.
-	AvailableFor OptString
+	AvailableFor OptString `json:",omitempty,omitzero"`
 	// Return also pools not from white list - just compatible by interfaces (maybe dangerous!).
-	IncludeUnverified OptBool
-	AcceptLanguage    OptString
+	IncludeUnverified OptBool   `json:",omitempty,omitzero"`
+	AcceptLanguage    OptString `json:",omitempty,omitzero"`
 }
 
 func unpackGetStakingPoolsParams(packed middleware.Parameters) (params GetStakingPoolsParams) {
@@ -11808,6 +12478,420 @@ func decodeGetTraceParams(args [1]string, argsEscaped bool, r *http.Request) (pa
 	return params, nil
 }
 
+// GetValidationRoundsParams is parameters of getValidationRounds operation.
+type GetValidationRoundsParams struct {
+	// Return the single round matching this election ID. Mutually exclusive with `block` and `unixtime`.
+	ElectionID OptInt64 `json:",omitempty,omitzero"`
+	// Find the round containing this masterchain block seqno and return it plus up to `limit-1` older
+	// rounds. Mutually exclusive with `election_id` and `unixtime`.
+	Block OptUint32 `json:",omitempty,omitzero"`
+	// Unix timestamp (seconds). Looks up the masterchain block at this time and uses it as the anchor.
+	// Mutually exclusive with `election_id` and `block`.
+	Unixtime OptUint32 `json:",omitempty,omitzero"`
+}
+
+func unpackGetValidationRoundsParams(packed middleware.Parameters) (params GetValidationRoundsParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "election_id",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.ElectionID = v.(OptInt64)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "block",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Block = v.(OptUint32)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "unixtime",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Unixtime = v.(OptUint32)
+		}
+	}
+	return params
+}
+
+func decodeGetValidationRoundsParams(args [0]string, argsEscaped bool, r *http.Request) (params GetValidationRoundsParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: election_id.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "election_id",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotElectionIDVal int64
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToInt64(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotElectionIDVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.ElectionID.SetTo(paramsDotElectionIDVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "election_id",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: block.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "block",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotBlockVal uint32
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToUint32(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotBlockVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Block.SetTo(paramsDotBlockVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "block",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: unixtime.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "unixtime",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotUnixtimeVal uint32
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToUint32(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotUnixtimeVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Unixtime.SetTo(paramsDotUnixtimeVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "unixtime",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// GetValidatorsParams is parameters of getValidators operation.
+type GetValidatorsParams struct {
+	// Masterchain block seqno. Defaults to latest. Mutually exclusive with `unixtime`.
+	Seqno OptUint32 `json:",omitempty,omitzero"`
+	// Unix timestamp (seconds). Looks up the masterchain block at this time and uses it as the anchor.
+	// Mutually exclusive with `seqno`.
+	Unixtime OptUint32 `json:",omitempty,omitzero"`
+	// Set to `1` to return only basic validator info (rank, pubkey, effective_stake, weight, reward,
+	// pool). Skips pool type detection, owner/validator addresses, nominator data, and returned-stake
+	// lookup — significantly faster.
+	Shallow OptBool `json:",omitempty,omitzero"`
+}
+
+func unpackGetValidatorsParams(packed middleware.Parameters) (params GetValidatorsParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "seqno",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Seqno = v.(OptUint32)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "unixtime",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Unixtime = v.(OptUint32)
+		}
+	}
+	{
+		key := middleware.ParameterKey{
+			Name: "shallow",
+			In:   "query",
+		}
+		if v, ok := packed[key]; ok {
+			params.Shallow = v.(OptBool)
+		}
+	}
+	return params
+}
+
+func decodeGetValidatorsParams(args [0]string, argsEscaped bool, r *http.Request) (params GetValidatorsParams, _ error) {
+	q := uri.NewQueryDecoder(r.URL.Query())
+	// Decode query: seqno.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "seqno",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotSeqnoVal uint32
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToUint32(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotSeqnoVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Seqno.SetTo(paramsDotSeqnoVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "seqno",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Decode query: unixtime.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "unixtime",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotUnixtimeVal uint32
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToUint32(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotUnixtimeVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Unixtime.SetTo(paramsDotUnixtimeVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "unixtime",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	// Set default value for query: shallow.
+	{
+		val := bool(false)
+		params.Shallow.SetTo(val)
+	}
+	// Decode query: shallow.
+	if err := func() error {
+		cfg := uri.QueryParameterDecodingConfig{
+			Name:    "shallow",
+			Style:   uri.QueryStyleForm,
+			Explode: true,
+		}
+
+		if err := q.HasParam(cfg); err == nil {
+			if err := q.DecodeParam(cfg, func(d uri.Decoder) error {
+				var paramsDotShallowVal bool
+				if err := func() error {
+					val, err := d.DecodeValue()
+					if err != nil {
+						return err
+					}
+
+					c, err := conv.ToBool(val)
+					if err != nil {
+						return err
+					}
+
+					paramsDotShallowVal = c
+					return nil
+				}(); err != nil {
+					return err
+				}
+				params.Shallow.SetTo(paramsDotShallowVal)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "shallow",
+			In:   "query",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
+// GetWalletInfoParams is parameters of getWalletInfo operation.
+type GetWalletInfoParams struct {
+	// Account ID.
+	AccountID string
+}
+
+func unpackGetWalletInfoParams(packed middleware.Parameters) (params GetWalletInfoParams) {
+	{
+		key := middleware.ParameterKey{
+			Name: "account_id",
+			In:   "path",
+		}
+		params.AccountID = packed[key].(string)
+	}
+	return params
+}
+
+func decodeGetWalletInfoParams(args [1]string, argsEscaped bool, r *http.Request) (params GetWalletInfoParams, _ error) {
+	// Decode path: account_id.
+	if err := func() error {
+		param := args[0]
+		if argsEscaped {
+			unescaped, err := url.PathUnescape(args[0])
+			if err != nil {
+				return errors.Wrap(err, "unescape path")
+			}
+			param = unescaped
+		}
+		if len(param) > 0 {
+			d := uri.NewPathDecoder(uri.PathDecoderConfig{
+				Param:   "account_id",
+				Value:   param,
+				Style:   uri.PathStyleSimple,
+				Explode: false,
+			})
+
+			if err := func() error {
+				val, err := d.DecodeValue()
+				if err != nil {
+					return err
+				}
+
+				c, err := conv.ToString(val)
+				if err != nil {
+					return err
+				}
+
+				params.AccountID = c
+				return nil
+			}(); err != nil {
+				return err
+			}
+		} else {
+			return validate.ErrFieldRequired
+		}
+		return nil
+	}(); err != nil {
+		return params, &ogenerrors.DecodeParamError{
+			Name: "account_id",
+			In:   "path",
+			Err:  err,
+		}
+	}
+	return params, nil
+}
+
 // GetWalletsByPublicKeyParams is parameters of getWalletsByPublicKey operation.
 type GetWalletsByPublicKeyParams struct {
 	PublicKey string
@@ -11984,13 +13068,17 @@ func decodeSearchAccountsParams(args [0]string, argsEscaped bool, r *http.Reques
 			}
 			if err := func() error {
 				if err := (validate.String{
-					MinLength:    3,
-					MinLengthSet: true,
-					MaxLength:    15,
-					MaxLengthSet: true,
-					Email:        false,
-					Hostname:     false,
-					Regex:        nil,
+					MinLength:     3,
+					MinLengthSet:  true,
+					MaxLength:     15,
+					MaxLengthSet:  true,
+					Email:         false,
+					Hostname:      false,
+					Regex:         nil,
+					MinNumeric:    0,
+					MinNumericSet: false,
+					MaxNumeric:    0,
+					MaxNumericSet: false,
 				}).Validate(string(params.Name)); err != nil {
 					return errors.Wrap(err, "string")
 				}
@@ -11999,7 +13087,7 @@ func decodeSearchAccountsParams(args [0]string, argsEscaped bool, r *http.Reques
 				return err
 			}
 		} else {
-			return validate.ErrFieldRequired
+			return err
 		}
 		return nil
 	}(); err != nil {

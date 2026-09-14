@@ -2,6 +2,7 @@ package bath
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
@@ -22,7 +23,7 @@ type AuctionBidBubble struct {
 
 type AuctionBidAction struct {
 	Type       NftAuctionType
-	Amount     int64
+	Amount     core.Price
 	Nft        *core.NftItem
 	NftAddress *tongo.AccountID
 	Bidder     tongo.AccountID
@@ -32,8 +33,11 @@ type AuctionBidAction struct {
 func (a AuctionBidBubble) ToAction() *Action {
 	return &Action{
 		AuctionBid: &AuctionBidAction{
-			Type:       a.Type,
-			Amount:     a.Amount,
+			Type: a.Type,
+			Amount: core.Price{
+				Currency: core.Currency{Type: core.CurrencyNative},
+				Amount:   *big.NewInt(a.Amount),
+			},
 			Nft:        a.Nft,
 			NftAddress: a.NftAddress,
 			Bidder:     a.Bidder,
@@ -70,7 +74,7 @@ var TgAuctionV1InitialBidStraw = Straw[AuctionBidBubble]{
 		return nil
 	},
 	SingleChild: &Straw[AuctionBidBubble]{
-		CheckFuncs: []bubbleCheck{IsTx, HasOpcode(0x299a3e15)},
+		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.TeleitemDeployMsgOp)},
 		Builder: func(newAction *AuctionBidBubble, bubble *Bubble) error {
 			tx := bubble.Info.(BubbleTx)
 			newAction.Success = tx.success

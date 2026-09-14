@@ -6,7 +6,6 @@ import (
 	"context"
 
 	"github.com/go-faster/jx"
-
 	ht "github.com/ogen-go/ogen/http"
 )
 
@@ -60,9 +59,18 @@ func (UnimplementedHandler) DnsResolve(ctx context.Context, params DnsResolvePar
 	return r, ht.ErrNotImplemented
 }
 
+// DownloadBlockchainBlockBoc implements downloadBlockchainBlockBoc operation.
+//
+// Download blockchain block BOC.
+//
+// GET /v2/blockchain/blocks/{block_id}/boc
+func (UnimplementedHandler) DownloadBlockchainBlockBoc(ctx context.Context, params DownloadBlockchainBlockBocParams) (r *DownloadBlockchainBlockBocOKHeaders, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // EmulateMessageToAccountEvent implements emulateMessageToAccountEvent operation.
 //
-// Emulate sending message to blockchain.
+// Emulate sending message to retrieve account-specific events.
 //
 // POST /v2/accounts/{account_id}/events/emulate
 func (UnimplementedHandler) EmulateMessageToAccountEvent(ctx context.Context, req *EmulateMessageToAccountEventReq, params EmulateMessageToAccountEventParams) (r *AccountEvent, _ error) {
@@ -71,7 +79,7 @@ func (UnimplementedHandler) EmulateMessageToAccountEvent(ctx context.Context, re
 
 // EmulateMessageToEvent implements emulateMessageToEvent operation.
 //
-// Emulate sending message to blockchain.
+// Emulate sending message to retrieve general blockchain events.
 //
 // POST /v2/events/emulate
 func (UnimplementedHandler) EmulateMessageToEvent(ctx context.Context, req *EmulateMessageToEventReq, params EmulateMessageToEventParams) (r *Event, _ error) {
@@ -80,7 +88,7 @@ func (UnimplementedHandler) EmulateMessageToEvent(ctx context.Context, req *Emul
 
 // EmulateMessageToTrace implements emulateMessageToTrace operation.
 //
-// Emulate sending message to blockchain.
+// Emulate sending message to retrieve with a detailed execution trace.
 //
 // POST /v2/traces/emulate
 func (UnimplementedHandler) EmulateMessageToTrace(ctx context.Context, req *EmulateMessageToTraceReq, params EmulateMessageToTraceParams) (r *Trace, _ error) {
@@ -89,7 +97,8 @@ func (UnimplementedHandler) EmulateMessageToTrace(ctx context.Context, req *Emul
 
 // EmulateMessageToWallet implements emulateMessageToWallet operation.
 //
-// Emulate sending message to blockchain.
+// Emulates a wallet message on the current blockchain state and derives its consequences for the
+// signing wallet.
 //
 // POST /v2/wallet/emulate
 func (UnimplementedHandler) EmulateMessageToWallet(ctx context.Context, req *EmulateMessageToWalletReq, params EmulateMessageToWalletParams) (r *MessageConsequences, _ error) {
@@ -102,6 +111,15 @@ func (UnimplementedHandler) EmulateMessageToWallet(ctx context.Context, req *Emu
 //
 // GET /v2/blockchain/accounts/{account_id}/methods/{method_name}
 func (UnimplementedHandler) ExecGetMethodForBlockchainAccount(ctx context.Context, params ExecGetMethodForBlockchainAccountParams) (r *MethodExecutionResult, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// ExecGetMethodWithBodyForBlockchainAccount implements execGetMethodWithBodyForBlockchainAccount operation.
+//
+// Execute get method for account.
+//
+// POST /v2/blockchain/accounts/{account_id}/methods/{method_name}
+func (UnimplementedHandler) ExecGetMethodWithBodyForBlockchainAccount(ctx context.Context, req OptExecGetMethodWithBodyForBlockchainAccountReq, params ExecGetMethodWithBodyForBlockchainAccountParams) (r *MethodExecutionResult, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -128,8 +146,8 @@ func (UnimplementedHandler) GaslessEstimate(ctx context.Context, req *GaslessEst
 // Submits the signed gasless transaction message to the network.
 //
 // POST /v2/gasless/send
-func (UnimplementedHandler) GaslessSend(ctx context.Context, req *GaslessSendReq) error {
-	return ht.ErrNotImplemented
+func (UnimplementedHandler) GaslessSend(ctx context.Context, req *GaslessSendReq) (r *GaslessTx, _ error) {
+	return r, ht.ErrNotImplemented
 }
 
 // GetAccount implements getAccount operation.
@@ -138,6 +156,16 @@ func (UnimplementedHandler) GaslessSend(ctx context.Context, req *GaslessSendReq
 //
 // GET /v2/accounts/{account_id}
 func (UnimplementedHandler) GetAccount(ctx context.Context, params GetAccountParams) (r *Account, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetAccountDefiAssets implements getAccountDefiAssets operation.
+//
+// Return DeFi assets locked in custom smart contracts: currently returns TON Whales staking and EVAA
+// lending positions.
+//
+// GET /v2/accounts/{account_id}/defi/assets
+func (UnimplementedHandler) GetAccountDefiAssets(ctx context.Context, params GetAccountDefiAssetsParams) (r *DefiAssets, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -199,35 +227,6 @@ func (UnimplementedHandler) GetAccountInfoByStateInit(ctx context.Context, req *
 	return r, ht.ErrNotImplemented
 }
 
-// GetAccountInscriptions implements getAccountInscriptions operation.
-//
-// Get all inscriptions by owner address. It's experimental API and can be dropped in the future.
-//
-// GET /v2/experimental/accounts/{account_id}/inscriptions
-func (UnimplementedHandler) GetAccountInscriptions(ctx context.Context, params GetAccountInscriptionsParams) (r *InscriptionBalances, _ error) {
-	return r, ht.ErrNotImplemented
-}
-
-// GetAccountInscriptionsHistory implements getAccountInscriptionsHistory operation.
-//
-// Get the transfer inscriptions history for account. It's experimental API and can be dropped in the
-// future.
-//
-// GET /v2/experimental/accounts/{account_id}/inscriptions/history
-func (UnimplementedHandler) GetAccountInscriptionsHistory(ctx context.Context, params GetAccountInscriptionsHistoryParams) (r *AccountEvents, _ error) {
-	return r, ht.ErrNotImplemented
-}
-
-// GetAccountInscriptionsHistoryByTicker implements getAccountInscriptionsHistoryByTicker operation.
-//
-// Get the transfer inscriptions history for account. It's experimental API and can be dropped in the
-// future.
-//
-// GET /v2/experimental/accounts/{account_id}/inscriptions/{ticker}/history
-func (UnimplementedHandler) GetAccountInscriptionsHistoryByTicker(ctx context.Context, params GetAccountInscriptionsHistoryByTickerParams) (r *AccountEvents, _ error) {
-	return r, ht.ErrNotImplemented
-}
-
 // GetAccountJettonBalance implements getAccountJettonBalance operation.
 //
 // Get Jetton balance by owner address.
@@ -239,7 +238,9 @@ func (UnimplementedHandler) GetAccountJettonBalance(ctx context.Context, params 
 
 // GetAccountJettonHistoryByID implements getAccountJettonHistoryByID operation.
 //
-// Get the transfer jetton history for account and jetton.
+// Please use `getJettonAccountHistoryByID“ instead.
+//
+// Deprecated: schema marks this operation as deprecated.
 //
 // GET /v2/accounts/{account_id}/jettons/{jetton_id}/history
 func (UnimplementedHandler) GetAccountJettonHistoryByID(ctx context.Context, params GetAccountJettonHistoryByIDParams) (r *AccountEvents, _ error) {
@@ -260,7 +261,7 @@ func (UnimplementedHandler) GetAccountJettonsBalances(ctx context.Context, param
 // Get the transfer jettons history for account.
 //
 // GET /v2/accounts/{account_id}/jettons/history
-func (UnimplementedHandler) GetAccountJettonsHistory(ctx context.Context, params GetAccountJettonsHistoryParams) (r *AccountEvents, _ error) {
+func (UnimplementedHandler) GetAccountJettonsHistory(ctx context.Context, params GetAccountJettonsHistoryParams) (r *JettonOperations, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -278,7 +279,7 @@ func (UnimplementedHandler) GetAccountMultisigs(ctx context.Context, params GetA
 // Get the transfer nft history.
 //
 // GET /v2/accounts/{account_id}/nfts/history
-func (UnimplementedHandler) GetAccountNftHistory(ctx context.Context, params GetAccountNftHistoryParams) (r *AccountEvents, _ error) {
+func (UnimplementedHandler) GetAccountNftHistory(ctx context.Context, params GetAccountNftHistoryParams) (r *NftOperations, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -457,6 +458,15 @@ func (UnimplementedHandler) GetBlockchainRawAccount(ctx context.Context, params 
 	return r, ht.ErrNotImplemented
 }
 
+// GetBlockchainRawAccounts implements getBlockchainRawAccounts operation.
+//
+// Get low-level information about several accounts taken directly from the blockchain.
+//
+// POST /v2/blockchain/accounts/_bulk
+func (UnimplementedHandler) GetBlockchainRawAccounts(ctx context.Context, req OptGetBlockchainRawAccountsReq) (r *BlockchainRawAccounts, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // GetBlockchainTransaction implements getBlockchainTransaction operation.
 //
 // Get transaction data.
@@ -534,22 +544,21 @@ func (UnimplementedHandler) GetExtraCurrencyInfo(ctx context.Context, params Get
 	return r, ht.ErrNotImplemented
 }
 
-// GetInscriptionOpTemplate implements getInscriptionOpTemplate operation.
-//
-// Return comment for making operation with inscription. please don't use it if you don't know what
-// you are doing.
-//
-// GET /v2/experimental/inscriptions/op-template
-func (UnimplementedHandler) GetInscriptionOpTemplate(ctx context.Context, params GetInscriptionOpTemplateParams) (r *GetInscriptionOpTemplateOK, _ error) {
-	return r, ht.ErrNotImplemented
-}
-
 // GetItemsFromCollection implements getItemsFromCollection operation.
 //
 // Get NFT items from collection by collection address.
 //
 // GET /v2/nfts/collections/{account_id}/items
 func (UnimplementedHandler) GetItemsFromCollection(ctx context.Context, params GetItemsFromCollectionParams) (r *NftItems, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetJettonAccountHistoryByID implements getJettonAccountHistoryByID operation.
+//
+// Get the transfer jetton history for account and jetton.
+//
+// GET /v2/jettons/{jetton_id}/accounts/{account_id}/history
+func (UnimplementedHandler) GetJettonAccountHistoryByID(ctx context.Context, params GetJettonAccountHistoryByIDParams) (r *JettonOperations, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -607,12 +616,31 @@ func (UnimplementedHandler) GetJettonsEvents(ctx context.Context, params GetJett
 	return r, ht.ErrNotImplemented
 }
 
+// GetLibraryByHash implements getLibraryByHash operation.
+//
+// Get library cell.
+//
+// GET /v2/blockchain/libraries/{hash}
+func (UnimplementedHandler) GetLibraryByHash(ctx context.Context, params GetLibraryByHashParams) (r *BlockchainLibrary, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // GetMarketsRates implements getMarketsRates operation.
 //
-// Get the TON price from markets.
+// Get the Gram price from markets.
 //
 // GET /v2/rates/markets
 func (UnimplementedHandler) GetMarketsRates(ctx context.Context) (r *GetMarketsRatesOK, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetMigrationWallets implements getMigrationWallets operation.
+//
+// Get migratable assets value (TON balance, jettons with prices, NFT count) for several wallets at
+// once.
+//
+// POST /v2/migration/wallets
+func (UnimplementedHandler) GetMigrationWallets(ctx context.Context, req OptGetMigrationWalletsReq, params GetMigrationWalletsParams) (r *MigrationWallets, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -622,6 +650,15 @@ func (UnimplementedHandler) GetMarketsRates(ctx context.Context) (r *GetMarketsR
 //
 // GET /v2/multisig/{account_id}
 func (UnimplementedHandler) GetMultisigAccount(ctx context.Context, params GetMultisigAccountParams) (r *Multisig, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetMultisigOrder implements getMultisigOrder operation.
+//
+// Get multisig order.
+//
+// GET /v2/multisig/order/{account_id}
+func (UnimplementedHandler) GetMultisigOrder(ctx context.Context, params GetMultisigOrderParams) (r *MultisigOrder, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -654,7 +691,9 @@ func (UnimplementedHandler) GetNftCollections(ctx context.Context, params GetNft
 
 // GetNftHistoryByID implements getNftHistoryByID operation.
 //
-// Get the transfer nfts history for account.
+// Please use `getAccountNftHistory“ instead.
+//
+// Deprecated: schema marks this operation as deprecated.
 //
 // GET /v2/nfts/{account_id}/history
 func (UnimplementedHandler) GetNftHistoryByID(ctx context.Context, params GetNftHistoryByIDParams) (r *AccountEvents, _ error) {
@@ -703,6 +742,15 @@ func (UnimplementedHandler) GetOpenapiYml(ctx context.Context) (r GetOpenapiYmlO
 //
 // GET /v2/liteserver/get_out_msg_queue_sizes
 func (UnimplementedHandler) GetOutMsgQueueSizes(ctx context.Context) (r *GetOutMsgQueueSizesOK, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetPurchaseHistory implements getPurchaseHistory operation.
+//
+// Get history of purchases.
+//
+// GET /v2/purchases/{account_id}/history
+func (UnimplementedHandler) GetPurchaseHistory(ctx context.Context, params GetPurchaseHistoryParams) (r *AccountPurchases, _ error) {
 	return r, ht.ErrNotImplemented
 }
 
@@ -860,6 +908,34 @@ func (UnimplementedHandler) GetReducedBlockchainBlocks(ctx context.Context, para
 	return r, ht.ErrNotImplemented
 }
 
+// GetRewardsApy implements getRewardsApy operation.
+//
+// Returns the current TON blockchain APY as a percent based on the latest completed validation round.
+//
+// GET /v2/rewards/apy
+func (UnimplementedHandler) GetRewardsApy(ctx context.Context) (r float64, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetRewardsStats implements getRewardsStats operation.
+//
+// Returns time series of APY and total stake from past validation rounds.
+//
+// GET /v2/rewards/stats
+func (UnimplementedHandler) GetRewardsStats(ctx context.Context) (r *RewardsStats, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetRoundRewards implements getRoundRewards operation.
+//
+// Computes per-validator and per-nominator reward distribution for a finished validation round using
+// the elector's bonuses value.
+//
+// GET /v2/rewards/round-rewards
+func (UnimplementedHandler) GetRoundRewards(ctx context.Context, params GetRoundRewardsParams) (r *RoundRewardsResponse, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // GetStakingPoolHistory implements getStakingPoolHistory operation.
 //
 // Pool history.
@@ -914,12 +990,59 @@ func (UnimplementedHandler) GetTrace(ctx context.Context, params GetTraceParams)
 	return r, ht.ErrNotImplemented
 }
 
+// GetValidationRounds implements getValidationRounds operation.
+//
+// Returns past and current validation rounds with boundaries, stakes, and bonuses. Always uses the
+// latest masterchain block.
+//
+// GET /v2/rewards/validation-rounds
+func (UnimplementedHandler) GetValidationRounds(ctx context.Context, params GetValidationRoundsParams) (r *ValidationRoundsResponse, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetValidators implements getValidators operation.
+//
+// Returns all current validators with stakes, rewards, pool addresses, and (optionally) nominator
+// breakdowns.
+//
+// GET /v2/rewards/validators
+func (UnimplementedHandler) GetValidators(ctx context.Context, params GetValidatorsParams) (r *ValidatorsResponse, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetWalletInfo implements getWalletInfo operation.
+//
+// Get human-friendly information about a wallet without low-level details.
+//
+// GET /v2/wallet/{account_id}
+func (UnimplementedHandler) GetWalletInfo(ctx context.Context, params GetWalletInfoParams) (r *Wallet, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
 // GetWalletsByPublicKey implements getWalletsByPublicKey operation.
 //
 // Get wallets by public key.
 //
 // GET /v2/pubkeys/{public_key}/wallets
-func (UnimplementedHandler) GetWalletsByPublicKey(ctx context.Context, params GetWalletsByPublicKeyParams) (r *Accounts, _ error) {
+func (UnimplementedHandler) GetWalletsByPublicKey(ctx context.Context, params GetWalletsByPublicKeyParams) (r *Wallets, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// GetWalletsByPublicKeyBulk implements getWalletsByPublicKeyBulk operation.
+//
+// Get wallets by a list of public keys.
+//
+// POST /v2/pubkeys/wallets/_bulk
+func (UnimplementedHandler) GetWalletsByPublicKeyBulk(ctx context.Context, req OptGetWalletsByPublicKeyBulkReq) (r *WalletsByPublicKeys, _ error) {
+	return r, ht.ErrNotImplemented
+}
+
+// PrepareMigration implements prepareMigration operation.
+//
+// Prepare ordered signable transactions that migrate every asset from `from` to `to`.
+//
+// POST /v2/migration/prepare
+func (UnimplementedHandler) PrepareMigration(ctx context.Context, req *MigrationPrepareRequest) (r PrepareMigrationRes, _ error) {
 	return r, ht.ErrNotImplemented
 }
 

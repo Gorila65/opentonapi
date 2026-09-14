@@ -9,6 +9,13 @@ import (
 
 var NftTransferNotifyStraw = Straw[BubbleNftTransfer]{
 	CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.NftItem)},
+	Builder: func(newAction *BubbleNftTransfer, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleTx)
+		if tx.inputFrom != nil {
+			newAction.sender = tx.inputFrom
+		}
+		return nil
+	},
 	Children: []Straw[BubbleNftTransfer]{
 		{
 			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.NftOwnershipAssignedMsgOp)},
@@ -43,7 +50,9 @@ var NftTransferStraw = Straw[BubbleNftTransfer]{
 		newAction.payload = transfer.ForwardPayload.Value
 		if newAction.recipient == nil {
 			newAction.recipient = parseAccount(transfer.NewOwner)
-			bubble.Accounts = append(bubble.Accounts, newAction.recipient.Address)
+			if newAction.recipient != nil {
+				bubble.Accounts = append(bubble.Accounts, newAction.recipient.Address)
+			}
 		}
 		return nil
 	},

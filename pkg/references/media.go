@@ -7,4 +7,6 @@ const (
 	PlugAutoCompleteAccount    = "https://raw.githubusercontent.com/tonkeeper/opentonapi/master/pkg/references/media/domain_plug.png"
 	PlugAutoCompleteJetton     = "https://raw.githubusercontent.com/tonkeeper/opentonapi/master/pkg/references/media/jetton_plug.png"
 	Placeholder                = "https://raw.githubusercontent.com/tonkeeper/opentonapi/master/pkg/references/media/token_placeholder.png"
+	TonSymbol                  = "https://raw.githubusercontent.com/tonkeeper/opentonapi/master/pkg/references/media/ton_symbol.png"
+	GramSymbol                 = "https://raw.githubusercontent.com/tonkeeper/opentonapi/master/pkg/references/media/gram_diamond_mark_200.png"
 )

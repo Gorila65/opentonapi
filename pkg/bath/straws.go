@@ -3,6 +3,7 @@ package bath
 import (
 	"math/big"
 
+	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/ton"
 )
@@ -17,6 +18,9 @@ var JettonTransfersBurnsMints = []Merger{
 	StonfiV1PTONStraw,
 	StonfiV2PTONStrawReverse,
 	StonfiV2PTONStraw,
+	EthenaTsUSDeTransferStraw,
+	FlawedJettonTransferClassicStraw,
+	FlawedJettonTransferMinimalStraw,
 	JettonTransferClassicStraw,
 	JettonTransferMinimalStraw,
 	JettonBurnStraw,
@@ -30,48 +34,94 @@ var NFTStraws = []Merger{
 	NftTransferNotifyStraw,
 }
 
-var SubscriptionStraws = []Merger{
-	InitialSubscriptionStraw,
-	ExtendedSubscriptionStraw,
-	UnSubscriptionStraw,
-}
-
-var DefaultStraws = []Merger{
-	StrawFindAuctionBidFragmentSimple,
-	NftTransferStraw,
-	NftTransferNotifyStraw,
-	StonfiV1PTONStraw,
-	StonfiV2PTONStrawReverse,
-	StonfiV2PTONStraw,
-	JettonTransferClassicStraw,
-	JettonTransferMinimalStraw,
-	JettonBurnStraw,
-	WtonMintStraw,
-	NftPurchaseStraw,
-	StonfiSwapStraw,
-	StonfiSwapV2Straw,
-	DedustSwapJettonsStraw,
-	DedustSwapToTONStraw,
-	DedustSwapFromTONStraw,
-	TgAuctionV1InitialBidStraw,
-	StrawAuctionBigGetgems,
-	StrawAuctionBuyGetgems,
-	StrawAuctionBuyFragments,
-	JettonMintFromMasterStraw,
-	JettonMintStrawGovernance,
-	MegatonFiJettonSwap,
-	InitialSubscriptionStraw,
-	ExtendedSubscriptionStraw,
-	UnSubscriptionStraw,
-	DepositLiquidStakeStraw,
-	PendingWithdrawRequestLiquidStraw,
-	ElectionsDepositStakeStraw,
-	ElectionsRecoverStakeStraw,
-	DepositTFStakeStraw,
-	WithdrawTFStakeRequestStraw,
-	WithdrawStakeImmediatelyStraw,
-	WithdrawLiquidStake,
-	DNSRenewStraw,
+func DefaultStraws(book AddressBook, infoSource core.InformationSource) []Merger {
+	return []Merger{
+		//0
+		StrawFindAuctionBidFragmentSimple,
+		NftTransferStraw,
+		NftTransferNotifyStraw,
+		StonfiV1PTONStraw,
+		StonfiV2PTONStrawReverse,
+		//5
+		StonfiV2PTONStraw,
+		EthenaTsUSDeTransferStraw,
+		FlawedJettonTransferClassicStraw,
+		FlawedJettonTransferMinimalStraw,
+		XTRWithdrawAction,
+		// 10
+		JettonTransferClassicStraw,
+		JettonTransferMinimalStraw,
+		GasRelayerStraw(book),
+		JettonBurnStraw,
+		WtonMintStraw,
+		NftPurchaseStraw,
+		// 15
+		StonfiSwapStraw,
+		UniversalStonfiStraw{},
+		UniversalDedustStraw{},
+		TgAuctionV1InitialBidStraw,
+		StrawAuctionBigGetgems,
+		// 20
+		StrawAuctionBuyGetgems,
+		StrawAuctionBuyFragments,
+		JettonMintFromMasterStraw,
+		JettonMintStrawGovernance,
+		InvoicePaymentStrawNative,
+		// 25
+		InvoicePaymentStrawJetton,
+		MegatonFiJettonSwap,
+		UnSubscriptionBySubscriberStraw,
+		UnSubscriptionByBeneficiaryOrExpiredStraw,
+		SubscriptionDeployStraw,
+		// 30
+		SubscriptionPaymentStraw,
+		SubscriptionPaymentWithRequestFundsStraw,
+		DepositLiquidStakeStraw,
+		PendingWithdrawRequestLiquidStraw,
+		ElectionsDepositStakeStraw,
+		// 35
+		ElectionsRecoverStakeStraw,
+		DepositTFStakeStraw,
+		WithdrawTFStakeRequestStraw,
+		WithdrawStakeImmediatelyStraw,
+		WithdrawLiquidStake,
+		// 40
+		DNSRenewStraw,
+		BidaskLiquidityDepositBothNativeStraw,
+		BidaskLiquidityDepositBothJettonStraw,
+		BidaskLiquidityDepositJettonStraw,
+		StonfiLiquidityDepositSingle,
+		// 45
+		StonfiLiquidityDepositBoth,
+		DepositEthenaStakeStraw,
+		WithdrawEthenaStakeRequestStraw,
+		BidaskSwapStraw,
+		BidaskSwapStrawReverse,
+		// 50
+		BidaskJettonSwapStraw,
+		MooncxSwapStraw,
+		MooncxSwapStrawReverse,
+		MoocxLiquidityDepositJettonStraw,
+		MoocxLiquidityDepositNativeStraw,
+		// 55
+		MoocxLiquidityDepositBothStraw,
+		ToncoSwapStraw,
+		ToncoDepositLiquiditySingleStraw,
+		ToncoDepositLiquidityBothStraw,
+		ToncoDepositLiquidityWithRefundStraw,
+		// 60
+		DepositAffluentEarnStraw,
+		DepositAffluentEarnWithOraclesStraw,
+		WithdrawAffluentEarnRequestStraw,
+		InstantWithdrawAffluentEarnStraw,
+		InstantWithdrawAffluentEarnWithOraclesStraw,
+		// 65
+		PythOraclePriceUpdateStraw(infoSource),
+		DepositFFVaultStakeStraw,
+		WithdrawalRequestFFVaultStraw,
+		XTRDepositAction,
+		XTRBuyAction,
+	}
 }
 
 var JettonTransferClassicStraw = Straw[BubbleJettonTransfer]{
@@ -137,6 +187,115 @@ var JettonTransferClassicStraw = Straw[BubbleJettonTransfer]{
 					}
 					if newAction.sender != nil {
 						flow.SubJettons(newAction.sender.Address, newAction.master, big.Int(newAction.amount))
+					}
+				},
+				Optional: true,
+			},
+			{
+				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+				Optional:   true,
+			},
+		},
+	},
+}
+
+var FlawedJettonTransferClassicStraw = Straw[BubbleFlawedJettonTransfer]{
+	CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.JettonWallet), HasOperation(abi.JettonTransferMsgOp), func(bubble *Bubble) bool {
+		// Check that sent amount is not the same as received one
+		currTx := bubble.Info.(BubbleTx)
+		transferBody, ok := currTx.decodedBody.Value.(abi.JettonTransferMsgBody)
+		if !ok {
+			return false
+		}
+		transferAmount := big.Int(transferBody.Amount)
+
+		for _, child := range bubble.Children {
+			internalTransferTx, ok := child.Info.(BubbleTx)
+			if !ok {
+				continue
+			}
+			if internalTransferTx.decodedBody == nil {
+				continue
+			}
+			internalTransfer, ok := internalTransferTx.decodedBody.Value.(abi.JettonInternalTransferMsgBody)
+			if !ok {
+				continue
+			}
+			internalTransferAmount := big.Int(internalTransfer.Amount)
+
+			if transferAmount.Cmp(&internalTransferAmount) == 0 {
+				continue
+			}
+
+			return true
+		}
+		return false
+	}},
+	Builder: func(newAction *BubbleFlawedJettonTransfer, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleTx)
+		newAction.master, _ = tx.additionalInfo.JettonMaster(tx.account.Address)
+		newAction.senderWallet = tx.account.Address
+		newAction.sender = tx.inputFrom
+		body := tx.decodedBody.Value.(abi.JettonTransferMsgBody)
+		newAction.sentAmount = body.Amount
+		newAction.payload = body.ForwardPayload.Value
+		recipient, err := ton.AccountIDFromTlb(body.Destination)
+		if err == nil && recipient != nil {
+			newAction.recipient = &Account{Address: *recipient}
+			bubble.Accounts = append(bubble.Accounts, *recipient)
+		}
+		return nil
+	},
+	SingleChild: &Straw[BubbleFlawedJettonTransfer]{
+		CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.JettonWallet), HasOperation(abi.JettonInternalTransferMsgOp)},
+		Optional:   true,
+		Builder: func(newAction *BubbleFlawedJettonTransfer, bubble *Bubble) error {
+			tx := bubble.Info.(BubbleTx)
+			newAction.recipientWallet = tx.account.Address
+			if newAction.master.IsZero() {
+				newAction.master, _ = tx.additionalInfo.JettonMaster(tx.account.Address)
+			}
+			body, _ := tx.decodedBody.Value.(abi.JettonInternalTransferMsgBody)
+			newAction.receivedAmount = body.Amount
+			newAction.success = tx.success
+			return nil
+		},
+		ValueFlowUpdater: func(newAction *BubbleFlawedJettonTransfer, flow *ValueFlow) {
+			if newAction.success {
+				if newAction.recipient != nil {
+					flow.AddJettons(newAction.recipient.Address, newAction.master, big.Int(newAction.receivedAmount))
+				}
+				if newAction.sender != nil {
+					flow.SubJettons(newAction.sender.Address, newAction.master, big.Int(newAction.sentAmount))
+				}
+			}
+		},
+		Children: []Straw[BubbleFlawedJettonTransfer]{
+			{
+				CheckFuncs: []bubbleCheck{IsTx, func(bubble *Bubble) bool {
+					return true
+				}, HasOperation(abi.JettonNotifyMsgOp)},
+				Builder: func(newAction *BubbleFlawedJettonTransfer, bubble *Bubble) error {
+					tx := bubble.Info.(BubbleTx)
+					newAction.success = true
+					body := tx.decodedBody.Value.(abi.JettonNotifyMsgBody)
+					newAction.receivedAmount = body.Amount
+					newAction.payload = body.ForwardPayload.Value
+					newAction.recipient = &tx.account
+					if newAction.sender == nil {
+						sender, err := ton.AccountIDFromTlb(body.Sender)
+						if err == nil {
+							newAction.sender = &Account{Address: *sender}
+						}
+					}
+					return nil
+				},
+				ValueFlowUpdater: func(newAction *BubbleFlawedJettonTransfer, flow *ValueFlow) {
+					if newAction.recipient != nil {
+						flow.AddJettons(newAction.recipient.Address, newAction.master, big.Int(newAction.receivedAmount))
+					}
+					if newAction.sender != nil {
+						flow.SubJettons(newAction.sender.Address, newAction.master, big.Int(newAction.sentAmount))
 					}
 				},
 				Optional: true,

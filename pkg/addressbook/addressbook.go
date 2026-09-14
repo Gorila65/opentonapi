@@ -12,6 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"maps"
+	"slices"
+
 	"github.com/shopspring/decimal"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
@@ -19,8 +22,6 @@ import (
 	"github.com/tonkeeper/tongo/tlb"
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 
 	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
@@ -36,6 +37,10 @@ type KnownAddress struct {
 	Name        string `json:"name"`
 	Address     string `json:"address"`
 	Image       string `json:"image,omitempty"`
+}
+
+func isTonAPIGasProxyName(name string) bool {
+	return strings.EqualFold(name, "TONAPI gas proxy") || strings.EqualFold(name, "TONAPI gas proxy (old)")
 }
 
 // AttachedAccountType defines different types of accounts (e.g., manual, NFT)
@@ -81,6 +86,8 @@ type Options struct {
 type addresser interface {
 	GetAddress(a tongo.AccountID) (KnownAddress, bool)
 	SearchAttachedAccounts(prefix string) []AttachedAccount
+	GetAttachedAccounts() []AttachedAccount
+	GasRelayers() map[ton.AccountID]bool
 }
 
 type accountsStatesSource interface {
@@ -140,7 +147,7 @@ func (b *Book) SearchAttachedAccountsByPrefix(prefix string) []AttachedAccount {
 			}
 		}
 	}
-	accounts := maps.Values(exclusiveAccounts)
+	accounts := slices.Collect(maps.Values(exclusiveAccounts))
 	tonDomainPrefix := prefix + "ton"
 	tgDomainPrefix := prefix + "tme"
 	// Boost weight for accounts that match the prefix
@@ -160,11 +167,36 @@ func (b *Book) SearchAttachedAccountsByPrefix(prefix string) []AttachedAccount {
 		}
 		return accounts[i].Weight > accounts[j].Weight
 	})
-	// Limit the result to 50 accounts
-	if len(accounts) > 50 {
-		accounts = accounts[:50]
+	// Filter duplicates by address, keeping first occurrence (already sorted)
+	var result []AttachedAccount
+	exists := make(map[string]struct{})
+	for _, account := range accounts {
+		address := account.Wallet.ToRaw()
+		if _, ok := exists[address]; ok {
+			continue // Skip if account already exists
+		}
+		exists[address] = struct{}{}
+		result = append(result, account)
 	}
-	return accounts
+	// Limit the result to 70 accounts
+	if len(result) > 70 {
+		result = result[:70]
+	}
+	return result
+}
+
+// GetGasRelayers returns addresses known as TONAPI gas proxies (incl. old ones - before rotation)
+func (b *Book) GetGasRelayers() map[ton.AccountID]bool {
+	if len(b.addressers) == 1 {
+		return b.addressers[0].GasRelayers()
+	}
+	result := make(map[ton.AccountID]bool)
+	for _, src := range b.addressers {
+		for addr := range src.GasRelayers() {
+			result[addr] = true
+		}
+	}
+	return result
 }
 
 // GetTFPoolInfo retrieves token pool info for an account
@@ -220,7 +252,7 @@ func (b *Book) GetJettonInfoByAddress(a tongo.AccountID) (KnownJetton, bool) {
 func (b *Book) TFPools() []tongo.AccountID {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return maps.Keys(b.tfPools)
+	return slices.Collect(maps.Keys(b.tfPools))
 }
 
 // IsWallet checks if the address is a wallet
@@ -251,6 +283,14 @@ type manualAddresser struct {
 	mu        sync.RWMutex
 	addresses map[tongo.AccountID]KnownAddress
 	sorted    []AttachedAccount
+	relayers  map[ton.AccountID]bool
+}
+
+// GetAttachedAccounts returns the list of attached accounts sorted by their names
+func (m *manualAddresser) GetAttachedAccounts() []AttachedAccount {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sorted
 }
 
 // GetAddress fetches known address by account
@@ -282,11 +322,23 @@ func (m *manualAddresser) SearchAttachedAccounts(prefix string) []AttachedAccoun
 	return foundAccounts
 }
 
+func (m *manualAddresser) GasRelayers() map[ton.AccountID]bool {
+	// lock is not needed because m.relayers is not modified concurrently, but is just being replaced on refresh
+	return m.relayers
+}
+
 // refreshAddresses updates the list of known addresses
-func (m *manualAddresser) refreshAddresses(addressPath, jettonPath string) error {
-	addresses, err := downloadJson[KnownAddress](addressPath)
+func (m *manualAddresser) refreshAddresses(addressPath, jettonPath string, addresses []addresser) error {
+	accountAddresses, err := downloadJson[KnownAddress](addressPath)
 	if err != nil {
 		return err
+	}
+	// Use only external addressers for preview image collection
+	addressImages := make(map[string]string)
+	for _, addr := range addresses {
+		for _, attachedAccount := range addr.GetAttachedAccounts() {
+			addressImages[attachedAccount.Wallet.ToRaw()] = attachedAccount.Preview
+		}
 	}
 	jettons, err := downloadJson[KnownJetton](jettonPath)
 	if err != nil {
@@ -294,41 +346,43 @@ func (m *manualAddresser) refreshAddresses(addressPath, jettonPath string) error
 	}
 	knownAccounts := make(map[tongo.AccountID]KnownAddress)
 	var attachedAccounts []AttachedAccount
-	process := func(accountID tongo.AccountID, name, image string, accountType AttachedAccountType) error {
-		// Generate name variants for the account
+	relayers := make(map[ton.AccountID]bool)
+	// Helper to process an account and convert it into attached accounts
+	process := func(accountID tongo.AccountID, name, image string, accountType AttachedAccountType) {
+		if image == "" {
+			image = addressImages[accountID.ToRaw()]
+		}
+		// Generate slug variants and create attached accounts
 		slugs := GenerateSlugVariants(name)
 		for _, slug := range slugs {
-			weight := KnownAccountWeight
 			// Convert known account to attached account
-			attachedAccount, err := ConvertAttachedAccount(name, slug, image, accountID, weight, core.TrustWhitelist, accountType)
+			attachedAccount, err := ConvertAttachedAccount(name, slug, image, accountID, KnownAccountWeight, core.TrustWhitelist, accountType)
 			if err != nil {
 				continue
 			}
 			attachedAccounts = append(attachedAccounts, attachedAccount)
 		}
-		return nil
 	}
-	for _, item := range addresses {
+	// Process all known accounts
+	for _, item := range accountAddresses {
 		accountID, err := ton.ParseAccountID(item.Address)
 		if err != nil {
-			return err
+			continue
 		}
 		item.Address = accountID.ToRaw()
 		knownAccounts[accountID] = item
-		err = process(accountID, item.Name, item.Image, ManualAccountType)
-		if err != nil {
-			continue
+		if isTonAPIGasProxyName(item.Name) {
+			relayers[accountID] = true
 		}
+		process(accountID, item.Name, item.Image, ManualAccountType)
 	}
+	// Process all known jettons
 	for _, jetton := range jettons {
 		accountID, err := ton.ParseAccountID(jetton.Address)
 		if err != nil {
-			return err
-		}
-		err = process(accountID, jetton.Name, jetton.Image, JettonNameAccountType)
-		if err != nil {
 			continue
 		}
+		process(accountID, jetton.Name, jetton.Image, JettonNameAccountType)
 	}
 	// Sort the attached accounts by their normalized names
 	sort.Slice(attachedAccounts, func(i, j int) bool {
@@ -338,6 +392,7 @@ func (m *manualAddresser) refreshAddresses(addressPath, jettonPath string) error
 	m.mu.Lock()
 	m.addresses = knownAccounts
 	m.sorted = attachedAccounts
+	m.relayers = relayers
 	m.mu.Unlock()
 
 	return nil
@@ -351,6 +406,12 @@ func NewAddressBook(logger *zap.Logger, addressPath, jettonPath, collectionPath 
 	options := Options{addressers: []addresser{manual}}
 	for _, opt := range opts {
 		opt(&options)
+	}
+	externalSources := make([]addresser, 0, len(options.addressers))
+	for _, addr := range options.addressers {
+		if addr != manual {
+			externalSources = append(externalSources, addr)
+		}
 	}
 
 	collections := make(map[tongo.AccountID]KnownCollection)
@@ -367,7 +428,7 @@ func NewAddressBook(logger *zap.Logger, addressPath, jettonPath, collectionPath 
 	}
 	// Start background refreshers
 	go Refresher("gg whitelist", time.Hour, 5*time.Minute, logger, book.getGGWhitelist)
-	go Refresher("addresses", time.Minute*15, 5*time.Minute, logger, func() error { return manual.refreshAddresses(addressPath, jettonPath) })
+	go Refresher("addresses", time.Minute*15, 5*time.Minute, logger, func() error { return manual.refreshAddresses(addressPath, jettonPath, externalSources) })
 	go Refresher("jettons", time.Minute*15, 5*time.Minute, logger, func() error { return book.refreshJettons(jettonPath) })
 	go Refresher("collections", time.Minute*15, 5*time.Minute, logger, func() error { return book.refreshCollections(collectionPath) })
 	book.refreshTfPools(logger) // Refresh tfPools once on initialization as it doesn't need periodic updates

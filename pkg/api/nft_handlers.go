@@ -10,7 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"golang.org/x/exp/slices"
+	"slices"
 
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
@@ -143,7 +143,7 @@ func (h *Handler) GetNftCollections(ctx context.Context, params oas.GetNftCollec
 	}
 	var collectionsRes oas.NftCollections
 	for _, collection := range collections {
-		col := convertNftCollection(collection, h.addressBook)
+		col := h.convertNftCollection(collection, h.addressBook)
 		collectionsRes.NftCollections = append(collectionsRes.NftCollections, col)
 	}
 	return &collectionsRes, nil
@@ -161,7 +161,7 @@ func (h *Handler) GetNftCollection(ctx context.Context, params oas.GetNftCollect
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	col := convertNftCollection(collection, h.addressBook)
+	col := h.convertNftCollection(collection, h.addressBook)
 	return &col, nil
 }
 
@@ -203,6 +203,7 @@ func (h *Handler) GetItemsFromCollection(ctx context.Context, params oas.GetItem
 	return &result, nil
 }
 
+// GetNftHistoryByID deprecated - will be removed
 func (h *Handler) GetNftHistoryByID(ctx context.Context, params oas.GetNftHistoryByIDParams) (*oas.AccountEvents, error) {
 	account, err := tongo.ParseAddress(params.AccountID)
 	if err != nil {
@@ -216,8 +217,7 @@ func (h *Handler) GetNftHistoryByID(ctx context.Context, params oas.GetNftHistor
 	for _, traceID := range traceIDs {
 		eventIDs = append(eventIDs, traceID.Hex())
 	}
-	isBannedTraces, err := h.spamFilter.GetEventsScamData(ctx, eventIDs)
-	events, lastLT, err := h.convertNftHistory(ctx, account.ID, traceIDs, isBannedTraces, params.AcceptLanguage)
+	events, lastLT, err := h.convertNftHistory(ctx, account.ID, traceIDs, params.AcceptLanguage)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -249,7 +249,7 @@ func (h *Handler) GetNftCollectionItemsByAddresses(ctx context.Context, request 
 	}
 	var result oas.NftCollections
 	for _, i := range collections {
-		result.NftCollections = append(result.NftCollections, convertNftCollection(i, h.addressBook))
+		result.NftCollections = append(result.NftCollections, h.convertNftCollection(i, h.addressBook))
 	}
 	return &result, nil
 }

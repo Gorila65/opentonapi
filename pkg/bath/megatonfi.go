@@ -3,6 +3,7 @@ package bath
 import (
 	"math/big"
 
+	"github.com/tonkeeper/opentonapi/pkg/references"
 	"github.com/tonkeeper/tongo/abi"
 )
 
@@ -17,7 +18,7 @@ var MegatonFiJettonSwap = Straw[BubbleJettonSwap]{
 		newAction.Router = tx.recipient.Address
 		newAction.In.JettonWallet = tx.senderWallet
 		newAction.In.JettonMaster = tx.master
-		newAction.Dex = Megatonfi
+		newAction.Dex = references.Megatonfi
 		return nil
 	},
 	Children: []Straw[BubbleJettonSwap]{
@@ -34,7 +35,7 @@ var MegatonFiJettonSwap = Straw[BubbleJettonSwap]{
 								newAction.Success = tx.success
 								newAction.Out.Amount = big.Int(tx.amount)
 								newAction.Out.IsTon = tx.isWrappedTon
-								newAction.Out.JettonWallet = tx.recipientWallet
+								newAction.Out.JettonWallet = tx.senderWallet
 								newAction.Out.JettonMaster = tx.master
 								return nil
 							},
@@ -47,7 +48,7 @@ var MegatonFiJettonSwap = Straw[BubbleJettonSwap]{
 }
 
 var WtonMintStraw = Straw[BubbleJettonMint]{
-	CheckFuncs: []bubbleCheck{IsTx, HasOpcode(0x77a33521)},
+	CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.MegatonWtonMintMsgOp)},
 	Builder: func(newAction *BubbleJettonMint, bubble *Bubble) error {
 		newAction.recipient = bubble.Info.(BubbleTx).account
 		return nil

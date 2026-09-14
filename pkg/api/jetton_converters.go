@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,7 +16,7 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 )
 
-func jettonPreview(master ton.AccountID, meta NormalizedMetadata, score int32) oas.JettonPreview {
+func jettonPreview(master ton.AccountID, meta NormalizedMetadata, score int32, scaledUiParams *core.ScaledUIParameters) oas.JettonPreview {
 	preview := oas.JettonPreview{
 		Address:      master.ToRaw(),
 		Name:         meta.Name,
@@ -27,6 +28,15 @@ func jettonPreview(master ton.AccountID, meta NormalizedMetadata, score int32) o
 	}
 	if meta.CustomPayloadApiUri != "" {
 		preview.CustomPayloadAPIURI = oas.NewOptString(meta.CustomPayloadApiUri)
+	}
+	if scaledUiParams != nil {
+		preview.ScaledUI.SetTo(oas.ScaledUI{
+			Numerator:   scaledUiParams.Numerator.String(),
+			Denominator: scaledUiParams.Denominator.String(),
+		})
+	}
+	if meta.Description != "" {
+		preview.SetDescription(oas.NewOptString(meta.Description))
 	}
 	return preview
 }
@@ -52,7 +62,7 @@ func jettonMetadata(account ton.AccountID, meta NormalizedMetadata) oas.JettonMe
 	return metadata
 }
 
-func (h *Handler) convertJettonHistory(ctx context.Context, account ton.AccountID, master *ton.AccountID, traceIDs []ton.Bits256, isBannedTraces map[string]bool, acceptLanguage oas.OptString) ([]oas.AccountEvent, int64, error) {
+func (h *Handler) convertJettonHistory(ctx context.Context, account ton.AccountID, master *ton.AccountID, traceIDs []ton.Bits256, acceptLanguage oas.OptString) ([]oas.AccountEvent, int64, error) {
 	var lastLT uint64
 	events := make([]oas.AccountEvent, 0, len(traceIDs))
 	for _, traceID := range traceIDs {
@@ -66,7 +76,8 @@ func (h *Handler) convertJettonHistory(ctx context.Context, account ton.AccountI
 		}
 		result, err := bath.FindActions(ctx, trace,
 			bath.WithStraws(bath.JettonTransfersBurnsMints),
-			bath.WithInformationSource(h.storage))
+			bath.WithInformationSource(h.storage),
+			bath.WithAddressBook(h.addressBook))
 		if err != nil {
 			return nil, 0, err
 		}
@@ -80,7 +91,7 @@ func (h *Handler) convertJettonHistory(ctx context.Context, account ton.AccountI
 			Extra:      result.Extra(account),
 		}
 		for _, action := range result.Actions {
-			if action.Type != bath.JettonTransfer && action.Type != bath.JettonBurn && action.Type != bath.JettonMint {
+			if action.Type != bath.FlawedJettonTransfer && action.Type != bath.JettonTransfer && action.Type != bath.JettonBurn && action.Type != bath.JettonMint {
 				continue
 			}
 			if master != nil && ((action.JettonTransfer != nil && action.JettonTransfer.Jetton != *master) ||
@@ -91,13 +102,13 @@ func (h *Handler) convertJettonHistory(ctx context.Context, account ton.AccountI
 			if !action.IsSubject(account) {
 				continue
 			}
-			convertedAction, err := h.convertAction(ctx, &account, action, acceptLanguage)
+			convertedAction, err := h.convertAction(ctx, &account, action, acceptLanguage, event.Lt)
 			if err != nil {
 				return nil, 0, err
 			}
 			event.Actions = append(event.Actions, convertedAction)
 		}
-		event.IsScam = h.spamFilter.IsScamEvent(event.Actions, &account, trace.Account, isBannedTraces[event.EventID])
+		event.IsScam = h.spamFilter.IsScamEvent(event.Actions, &account, trace.Account)
 		if len(event.Actions) == 0 {
 			continue
 		}
@@ -108,7 +119,33 @@ func (h *Handler) convertJettonHistory(ctx context.Context, account ton.AccountI
 	return events, int64(lastLT), nil
 }
 
-func (h *Handler) convertJettonBalance(ctx context.Context, wallet core.JettonWallet, currencies []string) (oas.JettonBalance, error) {
+func (h *Handler) convertJettonOperation(ctx context.Context, op core.JettonOperation) (oas.JettonOperation, error) {
+	b, err := json.Marshal(op.ForwardPayload)
+	if err != nil {
+		b = []byte{'{', '}'}
+	}
+	lt := int64(op.Lt)
+	scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, op.JettonMaster, &lt)
+	if err != nil {
+		return oas.JettonOperation{}, fmt.Errorf("failed to get scaled ui parameters: %w", err)
+	}
+	operation := oas.JettonOperation{
+		Operation:       oas.JettonOperationOperation(op.Operation),
+		Utime:           op.Utime,
+		Lt:              lt,
+		TransactionHash: op.TxID.Hex(),
+		TraceID:         op.TraceID.Hex(),
+		Source:          convertOptAccountAddress(op.Source, h.addressBook),
+		Destination:     convertOptAccountAddress(op.Destination, h.addressBook),
+		Jetton:          jettonPreview(op.JettonMaster, h.GetJettonNormalizedMetadata(ctx, op.JettonMaster), 0, scaledUiParams),
+		Amount:          op.Amount.String(),
+		Payload:         b,
+	}
+	return operation, nil
+}
+
+func (h *Handler) convertJettonBalance(ctx context.Context, wallet core.JettonWallet, currencies []string, scaledUiLt *int64, assetInfo *oas.JettonAssetInfo) (oas.JettonBalance, error) {
+	// the latest scaled ui parameters for jetton master if scaledUiLt == nil
 	todayRates, yesterdayRates, weekRates, monthRates, _ := h.getRates()
 	for idx, currency := range currencies {
 		if jetton, err := tongo.ParseAddress(currency); err == nil {
@@ -123,17 +160,22 @@ func (h *Handler) convertJettonBalance(ctx context.Context, wallet core.JettonWa
 		WalletAddress: convertAccountAddress(wallet.Address, h.addressBook),
 		Extensions:    wallet.Extensions,
 	}
+	scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, wallet.JettonAddress, scaledUiLt)
+	if err != nil {
+		h.logger.Warn(fmt.Sprintf("failed to get scaled ui parameters for master: %v", wallet.JettonAddress.ToRaw()))
+		return oas.JettonBalance{}, toError(http.StatusInternalServerError, err)
+	}
 	if wallet.Lock != nil {
 		jettonBalance.Lock = oas.NewOptJettonBalanceLock(oas.JettonBalanceLock{
 			Amount: wallet.Lock.FullBalance.String(),
 			Till:   wallet.Lock.UnlockTime,
 		})
 	}
-	var err error
 	rates := make(map[string]oas.TokenRates)
 	for _, currency := range currencies {
-		rates, err = convertRates(rates, wallet.JettonAddress.ToRaw(), currency, todayRates, yesterdayRates, weekRates, monthRates)
+		rates, err = h.convertRates(ctx, rates, wallet.JettonAddress.ToRaw(), currency, todayRates, yesterdayRates, weekRates, monthRates)
 		if err != nil {
+			rates = make(map[string]oas.TokenRates)
 			continue
 		}
 	}
@@ -144,34 +186,45 @@ func (h *Handler) convertJettonBalance(ctx context.Context, wallet core.JettonWa
 	meta, err := h.storage.GetJettonMasterMetadata(ctx, wallet.JettonAddress)
 	if err != nil && err.Error() == "not enough refs" {
 		// happens when metadata is broken, for example.
+		h.logger.Warn(fmt.Sprintf("not enough refs for jetton master metadata, master: %v", wallet.JettonAddress.ToRaw()))
 		return oas.JettonBalance{}, toError(http.StatusInternalServerError, err)
 	}
 	if err != nil && errors.Is(err, liteapi.ErrOnchainContentOnly) {
 		// we don't support such jettons
+		h.logger.Warn(fmt.Sprintf("onchain content only for master: %v", wallet.JettonAddress.ToRaw()))
 		return oas.JettonBalance{}, toError(http.StatusInternalServerError, err)
 	}
 	if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
+		h.logger.Warn(fmt.Sprintf("failed to convert jetton balance for unknown reason, master: %v", wallet.JettonAddress.ToRaw()))
 		return oas.JettonBalance{}, toError(http.StatusNotFound, err)
 	}
 	var normalizedMetadata NormalizedMetadata
 	info, ok := h.addressBook.GetJettonInfoByAddress(wallet.JettonAddress)
 	if ok {
-		normalizedMetadata = NormalizeMetadata(meta, &info, core.TrustNone)
+		normalizedMetadata = NormalizeMetadata(wallet.JettonAddress, meta, &info, core.TrustNone)
 	} else {
 		trust := core.TrustNone
 		if h.spamFilter != nil {
 			trust = h.spamFilter.JettonTrust(wallet.JettonAddress, meta.Symbol, meta.Name, meta.Image)
 		}
-		normalizedMetadata = NormalizeMetadata(meta, nil, trust)
+		normalizedMetadata = NormalizeMetadata(wallet.JettonAddress, meta, nil, trust)
 	}
 	score, _ := h.score.GetJettonScore(wallet.JettonAddress)
-	jettonBalance.Jetton = jettonPreview(wallet.JettonAddress, normalizedMetadata, score)
+	jettonBalance.Jetton = jettonPreview(wallet.JettonAddress, normalizedMetadata, score, scaledUiParams)
+	if assetInfo != nil {
+		jettonBalance.DefiAsset.SetTo(*assetInfo)
+	}
 
 	return jettonBalance, nil
 }
 
-func (h *Handler) convertJettonInfo(ctx context.Context, master core.JettonMaster, holders map[tongo.AccountID]int32) oas.JettonInfo {
-	meta := h.GetJettonNormalizedMetadata(ctx, master.Address)
+func (h *Handler) convertJettonInfo(ctx context.Context, master core.JettonMaster, holders map[tongo.AccountID]int32, scaledUiParams *core.ScaledUIParameters) oas.JettonInfo {
+	var meta NormalizedMetadata
+	if master.Enriched != nil {
+		meta = h.normalizeJettonMetadata(master.Address, master.Enriched.Metadata)
+	} else {
+		meta = h.GetJettonNormalizedMetadata(ctx, master.Address)
+	}
 	metadata := jettonMetadata(master.Address, meta)
 	info := oas.JettonInfo{
 		Mintable:     master.Mintable,
@@ -181,6 +234,38 @@ func (h *Handler) convertJettonInfo(ctx context.Context, master core.JettonMaste
 		HoldersCount: holders[master.Address],
 		Admin:        convertOptAccountAddress(master.Admin, h.addressBook),
 		Preview:      meta.PreviewImage,
+	}
+	if scaledUiParams != nil {
+		info.ScaledUI.SetTo(oas.ScaledUI{
+			Numerator:   scaledUiParams.Numerator.String(),
+			Denominator: scaledUiParams.Denominator.String(),
+		})
+	}
+	if master.CodeHash != "" {
+		info.CodeHash = oas.NewOptString(master.CodeHash)
+	}
+	if master.DataHash != "" {
+		info.DataHash = oas.NewOptString(master.DataHash)
+	}
+	if master.LastTransactionLt != 0 {
+		info.LastTransactionLt = oas.NewOptString(fmt.Sprintf("%d", master.LastTransactionLt))
+	}
+	ab, _ := h.addressBook.GetAddressInfoByAddress(master.Address)
+	if ab.Name != "" {
+		info.SetName(oas.NewOptNilString(ab.Name))
+	}
+	if master.Enriched != nil {
+		if len(master.Enriched.Interfaces) != 0 {
+			info.Interfaces = make([]string, len(master.Enriched.Interfaces))
+			for i, v := range master.Enriched.Interfaces {
+				info.Interfaces[i] = v.String()
+			}
+		}
+	} else if rawAccount, _ := h.storage.GetRawAccount(ctx, master.Address); rawAccount != nil && len(rawAccount.Interfaces) != 0 {
+		info.Interfaces = make([]string, len(rawAccount.Interfaces))
+		for i, v := range rawAccount.Interfaces {
+			info.Interfaces[i] = v.String()
+		}
 	}
 	return info
 }

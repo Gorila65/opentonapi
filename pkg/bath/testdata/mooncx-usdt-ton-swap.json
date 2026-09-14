@@ -1,0 +1,68 @@
+{
+   "Actions": [
+     {
+       "JettonSwap": {
+         "Dex": "mooncx",
+         "UserWallet": "0:b60586bd5ed20d7ea99b4e64ab4be63c175ae6493ff359a4b69bfd1b9cc69f0b",
+         "Router": "0:c319e273266d3212d0833d06eca4a7fdc2da32845da7f7aaf746cd839cbee850",
+         "In": {
+           "Amount": 61000000000,
+           "IsTon": true,
+           "JettonMaster": "0:0000000000000000000000000000000000000000000000000000000000000000",
+           "JettonWallet": "0:0000000000000000000000000000000000000000000000000000000000000000"
+         },
+         "Out": {
+           "Amount": 134385367,
+           "IsTon": false,
+           "JettonMaster": "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe",
+           "JettonWallet": "0:cef9291c81ea512a81c09211151e25851f5f4478ca35e13cdad7cd001a5712fd"
+         }
+       },
+       "Success": true,
+       "Type": "JettonSwap",
+       "BaseTransactions": [
+         "9df8e6f6ee48d63b43b5548672a9065c6a60498dc39fb4215a1a94a8c3f14765",
+         "052e83cd5773a2623f39630abda5ebfda5190287de44ccc1fb6d77f332ac47b8",
+         "fdf24e1fb2066e86689ad262ef0656d8b0b18f7de431632dc8b1507eff371986",
+         "fffc6b9b69d41baa0781bd69a0ff0f8022ad42764353f5087a45d4ab91ce3525",
+         "0a2f20125446a2ddfd18a79d1df3d39104c53370850166dc9c24a34cc6d2a21b"
+       ]
+     }
+   ],
+   "Accounts": [
+     {
+       "Account": "0:b60586bd5ed20d7ea99b4e64ab4be63c175ae6493ff359a4b69bfd1b9cc69f0b",
+       "Ton": -61014742981,
+       "Fee": 3869204,
+       "Jettons": [
+         {
+           "Address": "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe",
+           "Quantity": 134385367
+         }
+       ]
+     },
+     {
+       "Account": "0:c319e273266d3212d0833d06eca4a7fdc2da32845da7f7aaf746cd839cbee850",
+       "Ton": 61002011092,
+       "Fee": 5763308,
+       "Jettons": [
+         {
+           "Address": "0:b113a994b5024a16719f69139328eb759596c38a25f59028b146fecdc3621dfe",
+           "Quantity": -134385367
+         }
+       ]
+     },
+     {
+       "Account": "0:cef9291c81ea512a81c09211151e25851f5f4478ca35e13cdad7cd001a5712fd",
+       "Ton": -3,
+       "Fee": 1618403,
+       "Jettons": null
+     },
+     {
+       "Account": "0:eeb3d267e1f777fa52f8b61ac639ee5f1a0baba641d0f9c3212de0747116dc9e",
+       "Ton": 3,
+       "Fee": 1480974,
+       "Jettons": null
+     }
+   ]
+ }

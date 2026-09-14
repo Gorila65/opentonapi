@@ -21,27 +21,28 @@ type NftItem struct {
 	DNS               *string
 	Sale              *NftSaleInfo
 	Metadata          map[string]interface{}
+	CodeHash          string
+	DataHash          string
 }
 
 type NftCollection struct {
-	Address           tongo.AccountID
-	NextItemIndex     int64
-	OwnerAddress      *tongo.AccountID
-	ContentLayout     int
-	CollectionContent []byte
-	InWhitelist       bool //todo: remove
-	Metadata          map[string]interface{}
+	Address                        tongo.AccountID
+	NextItemIndex                  int64
+	OwnerAddress                   *tongo.AccountID
+	ContentLayout                  int
+	CollectionContent              []byte
+	Metadata                       map[string]interface{}
+	ContentURL                     string
+	LastOffchainMetaRefreshTry     time.Time
+	LastOffchainMetaRefreshSuccess time.Time
 }
 
 type NftSaleInfo struct {
-	Contract    tongo.AccountID
-	Marketplace tongo.AccountID
-	Nft         tongo.AccountID
-	Seller      *tongo.AccountID
-	Price       struct {
-		Token  *tongo.AccountID
-		Amount uint64
-	}
+	Contract       tongo.AccountID
+	Marketplace    tongo.AccountID
+	Nft            tongo.AccountID
+	Seller         *tongo.AccountID
+	Price          Price
 	MarketplaceFee uint64
 	RoyaltyAddress *tongo.AccountID
 	RoyaltyAmount  uint64

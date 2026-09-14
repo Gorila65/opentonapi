@@ -7,12 +7,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
-	"golang.org/x/exp/slices"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"slices"
+
+	"github.com/tonkeeper/opentonapi/internal/g"
+	"github.com/tonkeeper/tongo/boc"
+	"go.uber.org/zap"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -28,6 +32,7 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"github.com/tonkeeper/tongo/tontest"
 	"github.com/tonkeeper/tongo/txemulator"
+	tongoWallet "github.com/tonkeeper/tongo/wallet"
 )
 
 var (
@@ -40,6 +45,14 @@ var (
 		Name: "tonapi_send_message_counter",
 		Help: "The total number of messages received by /v2/blockchain/message endpoint",
 	})
+	sendMessageDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "tonapi_send_message_duration",
+		Help:    "Duration of /v2/blockchain/message requests by error reason",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"error_reason"})
+	savedEmulatedTraces = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "saved_emulated_traces",
+	}, []string{"status"})
 )
 
 type decodedMessage struct {
@@ -66,10 +79,18 @@ func decodeMessage(s string) (*decodedMessage, error) {
 }
 
 func (h *Handler) SendBlockchainMessage(ctx context.Context, request *oas.SendBlockchainMessageReq) error {
+	start := time.Now()
+	errorReason := "none"
+	defer func() {
+		sendMessageDuration.WithLabelValues(errorReason).Observe(time.Since(start).Seconds())
+	}()
+
 	if h.msgSender == nil {
+		errorReason = "msg_sender_not_configured"
 		return toError(http.StatusBadRequest, fmt.Errorf("msg sender is not configured"))
 	}
 	if !request.Boc.IsSet() && len(request.Batch) == 0 {
+		errorReason = "boc_not_found"
 		return toError(http.StatusBadRequest, fmt.Errorf("boc not found"))
 	}
 	var meta map[string]string
@@ -79,10 +100,12 @@ func (h *Handler) SendBlockchainMessage(ctx context.Context, request *oas.SendBl
 	if request.Boc.IsSet() {
 		m, err := decodeMessage(request.Boc.Value)
 		if err != nil {
+			errorReason = "invalid_boc"
 			return err
 		}
 		checksum := sha256.Sum256(m.payload)
 		if _, prs := h.blacklistedBocCache.Get(checksum); prs {
+			errorReason = "duplicate_message"
 			return toError(http.StatusBadRequest, fmt.Errorf("duplicate message"))
 		}
 		msgCopy := blockchain.ExtInMsgCopy{
@@ -95,9 +118,11 @@ func (h *Handler) SendBlockchainMessage(ctx context.Context, request *oas.SendBl
 		if err := h.msgSender.SendMessage(ctx, msgCopy); err != nil {
 			if strings.Contains(err.Error(), "cannot apply external message to current state") {
 				h.blacklistedBocCache.Set(checksum, struct{}{}, cache.WithExpiration(time.Minute))
+				errorReason = "cannot_apply_external_message"
 				return toError(http.StatusNotAcceptable, err)
 			}
 			sentry.Send("sending message", sentry.SentryInfoData{"payload": request.Boc}, sentry.LevelError)
+			errorReason = "send_message_error"
 			return toError(http.StatusInternalServerError, err)
 		}
 		h.blacklistedBocCache.Set(checksum, struct{}{}, cache.WithExpiration(time.Minute))
@@ -107,6 +132,7 @@ func (h *Handler) SendBlockchainMessage(ctx context.Context, request *oas.SendBl
 	for _, msgBoc := range request.Batch {
 		m, err := decodeMessage(msgBoc)
 		if err != nil {
+			errorReason = "invalid_boc"
 			return err
 		}
 		msgCopy := blockchain.ExtInMsgCopy{
@@ -138,8 +164,8 @@ func (h *Handler) getTraceByHash(ctx context.Context, hash tongo.Bits256) (*core
 		trace, err = h.storage.GetTrace(ctx, *txHash)
 		return trace, false, err
 	}
-	trace, ok := h.mempoolEmulate.traces.Get(hash)
-	if ok {
+	trace, _, _, err = h.storage.GetTraceWithState(ctx, hash.Hex())
+	if err == nil && trace != nil {
 		return trace, true, nil
 	}
 	return nil, false, core.ErrEntityNotFound
@@ -154,17 +180,38 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
 	}
+	if errors.Is(err, core.ErrTooManyEntities) {
+		return nil, toError(http.StatusNotFound, fmt.Errorf("more than one transaction with message hash"))
+	}
 	if errors.Is(err, core.ErrTraceIsTooLong) {
 		return nil, toError(http.StatusRequestEntityTooLarge, err)
 	}
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	convertedTrace := convertTrace(trace, h.addressBook)
+	if trace.InProgress() {
+		traceId := trace.Hash.Hex()[:32] //uuid like hash
+		traceEmulated, _, _, err := h.storage.GetTraceWithState(ctx, traceId)
+		if err != nil {
+			h.logger.Warn("get trace from storage: ", zap.Error(err))
+		}
+		if traceEmulated != nil {
+			traceEmulated = core.CopyTraceData(ctx, trace, traceEmulated)
+			trace = traceEmulated
+		}
+	}
+	convertedTrace := h.convertTrace(trace, h.addressBook)
 	if emulated {
-		convertedTrace.Emulated.SetTo(true)
+		setRecursiveEmulated(&convertedTrace)
 	}
 	return &convertedTrace, nil
+}
+
+func setRecursiveEmulated(trace *oas.Trace) {
+	trace.Emulated.SetTo(true)
+	for _, c := range trace.Children {
+		setRecursiveEmulated(&c)
+	}
 }
 
 func (h *Handler) GetEvent(ctx context.Context, params oas.GetEventParams) (*oas.Event, error) {
@@ -176,13 +223,30 @@ func (h *Handler) GetEvent(ctx context.Context, params oas.GetEventParams) (*oas
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
 	}
+	if errors.Is(err, core.ErrTooManyEntities) {
+		return nil, toError(http.StatusNotFound, fmt.Errorf("more than one transaction with message hash"))
+	}
 	if errors.Is(err, core.ErrTraceIsTooLong) {
 		return nil, toError(http.StatusRequestEntityTooLarge, err)
 	}
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage))
+
+	if trace.InProgress() {
+		hash := trace.Hash.Hex()[:32] //uuid like hash
+		traceEmulated, _, _, err := h.storage.GetTraceWithState(ctx, hash)
+		if err != nil {
+			h.logger.Warn("get trace from storage: ", zap.Error(err))
+		}
+		if traceEmulated != nil {
+			// we copy data from finished transactions. for emulated it's provided while emulation
+			traceEmulated = core.CopyTraceData(ctx, trace, traceEmulated)
+			trace = traceEmulated
+		}
+	}
+
+	actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage), bath.WithAddressBook(h.addressBook))
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -195,20 +259,11 @@ func (h *Handler) GetEvent(ctx context.Context, params oas.GetEventParams) (*oas
 	if err != nil {
 		h.logger.Warn("error getting events spam data", zap.Error(err))
 	}
-	event.IsScam = event.IsScam || isBannedTraces[traceID.Hex()]
+	event.IsScam = h.applyTraceBan(event.IsScam, isBannedTraces[traceID.Hex()], trace.Account)
 	if emulated {
 		event.InProgress = true
 	}
 	return &event, nil
-}
-
-func contains[T comparable](sl []T, s T) bool {
-	for i := range sl {
-		if sl[i] == s {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *Handler) GetAccountEvents(ctx context.Context, params oas.GetAccountEventsParams) (*oas.AccountEvents, error) {
@@ -216,7 +271,9 @@ func (h *Handler) GetAccountEvents(ctx context.Context, params oas.GetAccountEve
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	traceIDs, err := h.storage.SearchTraces(ctx, account.ID, params.Limit, optIntToPointer(params.BeforeLt), optIntToPointer(params.StartDate), optIntToPointer(params.EndDate), params.Initiator.Value)
+
+	descendingOrder := params.SortOrder.Value == oas.GetAccountEventsSortOrderDesc
+	traceIDs, err := h.storage.SearchTraces(ctx, account.ID, params.Limit, optIntToPointer(params.BeforeLt), optIntToPointer(params.AfterLt), optIntToPointer(params.StartDate), optIntToPointer(params.EndDate), params.Initiator.Value, descendingOrder)
 	if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -240,47 +297,82 @@ func (h *Handler) GetAccountEvents(ctx context.Context, params oas.GetAccountEve
 	}()
 
 	var lastLT uint64
-	for _, traceID := range traceIDs {
-		lastLT = traceID.Lt
-		trace, err := h.storage.GetTrace(ctx, traceID.Hash)
-		if err != nil {
-			if errors.Is(err, core.ErrTraceIsTooLong) {
-				events = append(events, h.toAccountEventForLongTrace(account.ID, traceID))
-			} else {
-				events = append(events, h.toUnknownAccountEvent(account.ID, traceID))
-			}
-			continue
-		}
-		actions, err := bath.FindActions(ctx, trace, bath.ForAccount(account.ID), bath.WithInformationSource(h.storage))
-		if err != nil {
-			events = append(events, h.toUnknownAccountEvent(account.ID, traceID))
-			continue
-			//return nil, toError(http.StatusInternalServerError, err)
-		}
-		result := bath.EnrichWithIntentions(trace, actions)
-		e, err := h.toAccountEvent(ctx, account.ID, trace, result, params.AcceptLanguage, params.SubjectOnly.Value)
-		if err != nil {
-			events = append(events, h.toUnknownAccountEvent(account.ID, traceID))
-			continue
-			//return nil, toError(http.StatusInternalServerError, err)
-		}
-		events = append(events, e)
+	if len(traceIDs) > 0 {
+		lastLT = traceIDs[len(traceIDs)-1].Lt
 	}
-	if !(params.BeforeLt.IsSet() || params.StartDate.IsSet() || params.EndDate.IsSet() || (len(events) > 0 && events[0].InProgress)) { //if we look into history we don't need to mix mempool
+	// initiatorByEvent maps each event ID to its trace initiator so the banned-trace
+	// override can respect the account whitelist (see applyTraceBan).
+	initiatorByEvent := make(map[string]tongo.AccountID, len(traceIDs))
+	if h.parallelTraceProcessing {
+		// Parallel mode: trades latency for CPU density.
+		// Disable via PARALLEL_TRACE_PROCESSING=false under DDoS.
+		results := make([]oas.AccountEvent, len(traceIDs))
+		initiators := make([]tongo.AccountID, len(traceIDs))
+		var traceWg sync.WaitGroup
+		for i, traceID := range traceIDs {
+			traceWg.Add(1)
+			go func(idx int, tid core.TraceID) {
+				defer traceWg.Done()
+				results[idx], initiators[idx] = h.processTrace(ctx, account.ID, tid, params.AcceptLanguage, params.SubjectOnly.Value)
+			}(i, traceID)
+		}
+		traceWg.Wait()
+		events = append(events, results...)
+		for i := range results {
+			initiatorByEvent[results[i].EventID] = initiators[i]
+		}
+	} else {
+		for _, traceID := range traceIDs {
+			event, initiator := h.processTrace(ctx, account.ID, traceID, params.AcceptLanguage, params.SubjectOnly.Value)
+			events = append(events, event)
+			initiatorByEvent[event.EventID] = initiator
+		}
+	}
+
+	isHistoryLookup := params.BeforeLt.IsSet() || params.StartDate.IsSet() || params.EndDate.IsSet()
+	pendingAlreadyAdded := len(events) > 0 && events[0].InProgress
+
+	if descendingOrder && !(isHistoryLookup || pendingAlreadyAdded) {
 		memTraces, _ := h.mempoolEmulate.accountsTraces.Get(account.ID)
+		pendingLimits := getPendingLimits(params.Limit)
 		i := 0
 		for _, hash := range memTraces {
-			if i > params.Limit-10 { // we want always to save at least 1 real transaction
+			if i > pendingLimits { // reserver slots for real transactions
 				break
 			}
 			tx, _ := h.storage.SearchTransactionByMessageHash(ctx, hash)
-			trace, prs := h.mempoolEmulate.traces.Get(hash)
-			if tx != nil || !prs { //if err is nil it's already processed. If !prs we can't do anything
-				h.mempoolEmulate.traces.Delete(hash)
+			var trace *core.Trace
+			if tx != nil {
+				if slices.ContainsFunc(traceIDs, func(t core.TraceID) bool { //скипаем трейсы которые уже есть в ответе
+					return t.Hash == *tx
+				}) {
+					continue
+				}
+				// try by txHash
+				traceId := tx.Hex()[:32] //cuted for uuid
+				traceEmulated, _, _, err := h.storage.GetTraceWithState(ctx, traceId)
+				if err != nil {
+					h.logger.Warn("get trace from storage: ", zap.Error(err))
+				}
+				if traceEmulated != nil {
+					trace = traceEmulated
+				}
+			}
+			if trace == nil {
+				// try by external message hash
+				traceEmulatedByExternal, _, _, err := h.storage.GetTraceWithState(ctx, hash.Hex())
+				if err != nil {
+					h.logger.Warn("get trace from storage: ", zap.Error(err))
+				}
+				if traceEmulatedByExternal != nil {
+					trace = traceEmulatedByExternal
+				}
+			}
+			if trace == nil {
 				continue
 			}
 			i++
-			actions, err := bath.FindActions(ctx, trace, bath.ForAccount(account.ID), bath.WithInformationSource(h.storage))
+			actions, err := bath.FindActions(ctx, trace, bath.ForAccount(account.ID), bath.WithInformationSource(h.storage), bath.WithAddressBook(h.addressBook))
 			if err != nil {
 				return nil, toError(http.StatusInternalServerError, err)
 			}
@@ -291,6 +383,7 @@ func (h *Handler) GetAccountEvents(ctx context.Context, params oas.GetAccountEve
 			}
 			event.InProgress = true
 			event.EventID = hash.Hex()
+			initiatorByEvent[event.EventID] = trace.Account
 			events = slices.Insert(events, 0, event)
 			if len(events) > params.Limit {
 				events = events[:params.Limit]
@@ -314,15 +407,39 @@ func (h *Handler) GetAccountEvents(ctx context.Context, params oas.GetAccountEve
 	}
 	for i, e := range events {
 		if e.InProgress {
-			for j, _ := range e.Actions {
+			for j := range e.Actions {
 				events[i].Actions[j].Status = oas.ActionStatusOk
 			}
 		}
 	}
 	for i := range events {
-		events[i].IsScam = events[i].IsScam || isBannedTraces[events[i].EventID]
+		events[i].IsScam = h.applyTraceBan(events[i].IsScam, isBannedTraces[events[i].EventID], initiatorByEvent[events[i].EventID])
 	}
 	return &oas.AccountEvents{Events: events, NextFrom: int64(lastLT)}, nil
+}
+
+// processTrace returns the account event and the trace initiator (root account),
+// which the caller needs to let a whitelisted initiator override a DB trace ban.
+// On fallbacks the trace isn't available, so a zero AccountID is returned, which
+// leaves any ban in place (TrustNone).
+func (h *Handler) processTrace(ctx context.Context, account tongo.AccountID, tid core.TraceID, lang oas.OptString, subjectOnly bool) (oas.AccountEvent, tongo.AccountID) {
+	trace, err := h.storage.GetTrace(ctx, tid.Hash)
+	if errors.Is(err, core.ErrTraceIsTooLong) {
+		return h.toAccountEventForLongTrace(account, tid), tongo.AccountID{}
+	}
+	if err != nil {
+		return h.toUnknownAccountEvent(account, tid), tongo.AccountID{}
+	}
+	actions, err := bath.FindActions(ctx, trace, bath.ForAccount(account), bath.WithInformationSource(h.storage), bath.WithAddressBook(h.addressBook))
+	if err != nil {
+		return h.toUnknownAccountEvent(account, tid), tongo.AccountID{}
+	}
+	result := bath.EnrichWithIntentions(trace, actions)
+	converted, err := h.toAccountEvent(ctx, account, trace, result, lang, subjectOnly)
+	if err != nil {
+		return h.toUnknownAccountEvent(account, tid), tongo.AccountID{}
+	}
+	return converted, trace.Account
 }
 
 func (h *Handler) GetAccountEvent(ctx context.Context, params oas.GetAccountEventParams) (*oas.AccountEvent, error) {
@@ -334,9 +451,22 @@ func (h *Handler) GetAccountEvent(ctx context.Context, params oas.GetAccountEven
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var isBannedTraces map[string]bool
+	go func() {
+		defer wg.Done()
+		isBannedTraces, err = h.spamFilter.GetEventsScamData(ctx, []string{traceID.Hex()})
+		if err != nil {
+			h.logger.Warn("error getting events spam data", zap.Error(err))
+		}
+	}()
 	trace, emulated, err := h.getTraceByHash(ctx, traceID)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
+	}
+	if errors.Is(err, core.ErrTooManyEntities) {
+		return nil, toError(http.StatusNotFound, fmt.Errorf("more than one transaction with message hash"))
 	}
 	if errors.Is(err, core.ErrTraceIsTooLong) {
 		return nil, toError(http.StatusRequestEntityTooLarge, err)
@@ -344,7 +474,7 @@ func (h *Handler) GetAccountEvent(ctx context.Context, params oas.GetAccountEven
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	actions, err := bath.FindActions(ctx, trace, bath.ForAccount(account.ID), bath.WithInformationSource(h.storage))
+	actions, err := bath.FindActions(ctx, trace, bath.ForAccount(account.ID), bath.WithInformationSource(h.storage), bath.WithAddressBook(h.addressBook))
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -353,15 +483,21 @@ func (h *Handler) GetAccountEvent(ctx context.Context, params oas.GetAccountEven
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	isBannedTraces, err := h.spamFilter.GetEventsScamData(ctx, []string{traceID.Hex()})
-	if err != nil {
-		h.logger.Warn("error getting events spam data", zap.Error(err))
-	}
-	event.IsScam = event.IsScam || isBannedTraces[traceID.Hex()]
+	wg.Wait()
+	event.IsScam = h.applyTraceBan(event.IsScam, isBannedTraces[traceID.Hex()], trace.Account)
 	if emulated {
 		event.InProgress = true
 	}
 	return &event, nil
+}
+
+func (h *Handler) applyTraceBan(heuristicScam, banned bool, initiator tongo.AccountID) bool {
+	switch h.spamFilter.AccountTrust(initiator) {
+	case core.TrustWhitelist, core.TrustGraylist:
+		return false
+	default:
+		return heuristicScam || banned
+	}
 }
 
 func toProperEmulationError(err error) error {
@@ -390,31 +526,46 @@ func (h *Handler) EmulateMessageToAccountEvent(ctx context.Context, request *oas
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	configBase64, err := h.storage.TrimmedConfigBase64()
+	hash := m.Hash(true).Hex()
+	trace, version, _, err := h.storage.GetTraceWithState(ctx, hash)
 	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
+		h.logger.Warn("get trace from storage: ", zap.Error(err))
+		savedEmulatedTraces.WithLabelValues("error_restore").Inc()
 	}
-	options := []txemulator.TraceOption{
-		txemulator.WithAccountsSource(h.storage),
-		txemulator.WithConfigBase64(configBase64),
-		txemulator.WithLimit(1100),
+	if trace == nil || h.tongoVersion == 0 || version > h.tongoVersion {
+		if version > h.tongoVersion {
+			savedEmulatedTraces.WithLabelValues("expired").Inc()
+		}
+		configBase64, err := h.storage.TrimmedConfigBase64()
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, err)
+		}
+		options := []txemulator.TraceOption{
+			txemulator.WithAccountsSource(h.storage),
+			txemulator.WithConfigBase64(configBase64),
+			txemulator.WithLimit(1100),
+		}
+		if params.IgnoreSignatureCheck.Value {
+			options = append(options, txemulator.WithIgnoreSignatureDepth(1000000))
+		}
+		emulator, err := txemulator.NewTraceBuilder(options...)
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, err)
+		}
+		tree, emulationErr := emulator.Run(ctx, m)
+		if emulationErr != nil {
+			return nil, toProperEmulationError(emulationErr)
+		}
+		trace, err = EmulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool, true)
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, err)
+		}
+		h.saveTraceWithState(ctx, trace, c, hash)
+
+	} else {
+		savedEmulatedTraces.WithLabelValues("restored").Inc()
 	}
-	if !params.IgnoreSignatureCheck.Value {
-		options = append(options, txemulator.WithSignatureCheck())
-	}
-	emulator, err := txemulator.NewTraceBuilder(options...)
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	tree, err := emulator.Run(ctx, m)
-	if err != nil {
-		return nil, toProperEmulationError(err)
-	}
-	trace, err := emulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool)
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage))
+	actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage), bath.WithAddressBook(h.addressBook))
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -431,15 +582,19 @@ func (h *Handler) EmulateMessageToEvent(ctx context.Context, request *oas.Emulat
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	hash, err := c.Hash256()
-	if err != nil {
+	var m tlb.Message
+	if err := tlb.Unmarshal(c, &m); err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	trace, prs := h.mempoolEmulate.traces.Get(hash)
-	if !prs {
-		var m tlb.Message
-		if err := tlb.Unmarshal(c, &m); err != nil {
-			return nil, toError(http.StatusBadRequest, err)
+	hs := m.Hash(true).Hex()
+	trace, version, _, err := h.storage.GetTraceWithState(ctx, hs)
+	if err != nil {
+		h.logger.Warn("get trace from storage: ", zap.Error(err))
+		savedEmulatedTraces.WithLabelValues("error_restore").Inc()
+	}
+	if trace == nil || h.tongoVersion == 0 || version > h.tongoVersion {
+		if version > h.tongoVersion {
+			savedEmulatedTraces.WithLabelValues("expired").Inc()
 		}
 		configBase64, err := h.storage.TrimmedConfigBase64()
 		if err != nil {
@@ -449,24 +604,27 @@ func (h *Handler) EmulateMessageToEvent(ctx context.Context, request *oas.Emulat
 			txemulator.WithAccountsSource(h.storage),
 			txemulator.WithConfigBase64(configBase64),
 		}
-		if !params.IgnoreSignatureCheck.Value {
-			options = append(options, txemulator.WithSignatureCheck())
+		if params.IgnoreSignatureCheck.Value {
+			options = append(options, txemulator.WithIgnoreSignatureDepth(1000000))
 		}
-
 		emulator, err := txemulator.NewTraceBuilder(options...)
 		if err != nil {
 			return nil, toError(http.StatusInternalServerError, err)
 		}
-		tree, err := emulator.Run(ctx, m)
-		if err != nil {
-			return nil, toProperEmulationError(err)
+		tree, emulationErr := emulator.Run(ctx, m)
+		if emulationErr != nil {
+			return nil, toProperEmulationError(emulationErr)
 		}
-		trace, err = emulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool)
+		trace, err = EmulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool, true)
 		if err != nil {
 			return nil, toError(http.StatusInternalServerError, err)
 		}
+		h.saveTraceWithState(ctx, trace, c, hs)
+	} else {
+		savedEmulatedTraces.WithLabelValues("restored").Inc()
 	}
-	actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage))
+
+	actions, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage), bath.WithAddressBook(h.addressBook))
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -483,16 +641,20 @@ func (h *Handler) EmulateMessageToTrace(ctx context.Context, request *oas.Emulat
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	hash, err := c.Hash256()
+	var m tlb.Message
+	err = tlb.Unmarshal(c, &m)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	trace, prs := h.mempoolEmulate.traces.Get(hash)
-	if !prs {
-		var m tlb.Message
-		err = tlb.Unmarshal(c, &m)
-		if err != nil {
-			return nil, toError(http.StatusBadRequest, err)
+	hs := m.Hash(true).Hex()
+	trace, version, _, err := h.storage.GetTraceWithState(ctx, hs)
+	if err != nil {
+		h.logger.Warn("get trace from storage: ", zap.Error(err))
+		savedEmulatedTraces.WithLabelValues("error_restore").Inc()
+	}
+	if trace == nil || h.tongoVersion == 0 || version > h.tongoVersion {
+		if version > h.tongoVersion {
+			savedEmulatedTraces.WithLabelValues("expired").Inc()
 		}
 		configBase64, err := h.storage.TrimmedConfigBase64()
 		if err != nil {
@@ -502,24 +664,27 @@ func (h *Handler) EmulateMessageToTrace(ctx context.Context, request *oas.Emulat
 			txemulator.WithAccountsSource(h.storage),
 			txemulator.WithConfigBase64(configBase64),
 		}
-		if !params.IgnoreSignatureCheck.Value {
-			options = append(options, txemulator.WithSignatureCheck())
+		if params.IgnoreSignatureCheck.Value {
+			options = append(options, txemulator.WithIgnoreSignatureDepth(1000000))
 		}
-
 		emulator, err := txemulator.NewTraceBuilder(options...)
 		if err != nil {
 			return nil, toError(http.StatusInternalServerError, err)
 		}
-		tree, err := emulator.Run(ctx, m)
-		if err != nil {
-			return nil, toProperEmulationError(err)
+		tree, emulationErr := emulator.Run(ctx, m)
+		if emulationErr != nil {
+			return nil, toProperEmulationError(emulationErr)
 		}
-		trace, err = emulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool)
+		trace, err = EmulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool, true)
 		if err != nil {
 			return nil, toError(http.StatusInternalServerError, err)
 		}
+		h.saveTraceWithState(ctx, trace, c, hs)
+	} else {
+		savedEmulatedTraces.WithLabelValues("restored").Inc()
 	}
-	t := convertTrace(trace, h.addressBook)
+
+	t := h.convertTrace(trace, h.addressBook)
 	return &t, nil
 }
 
@@ -538,8 +703,9 @@ func extractDestinationWallet(message tlb.Message) (*ton.AccountID, error) {
 }
 
 func prepareAccountState(accountID tongo.AccountID, state tlb.ShardAccount, startBalance int64) (tlb.ShardAccount, error) {
-	if state.Account.Status() == tlb.AccountActive {
+	if state.Account.SumType == "Account" && state.Account.Account.Storage.State.SumType == "AccountActive" {
 		state.Account.Account.Storage.Balance.Grams = tlb.Grams(startBalance)
+		state.Account.Account.StorageStat.StorageExtra.SumType = "StorageExtraNone"
 		return state, nil
 	}
 	return tontest.
@@ -582,79 +748,108 @@ func (h *Handler) EmulateMessageToWallet(ctx context.Context, request *oas.Emula
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	var code []byte
-	if account, err := h.storage.GetRawAccount(ctx, *walletAddress); err == nil && len(account.Code) > 0 {
-		code = account.Code
-	} else if m.Init.Exists && m.Init.Value.Value.Code.Exists {
-		code, err = m.Init.Value.Value.Code.Value.Value.ToBoc()
+	if request.AddressOverride.IsSet() {
+		addr, err := tongo.ParseAddress(request.AddressOverride.Value)
 		if err != nil {
 			return nil, toError(http.StatusBadRequest, err)
 		}
-	} else if err == nil {
+		walletAddress = &addr.ID
+		m.Info.ExtInMsgInfo.Dest = addr.ID.ToMsgAddress()
+	}
+	var code boc.Cell
+	if account, err := h.storage.GetRawAccount(ctx, *walletAddress); err == nil && len(account.Code) > 0 {
+		codeP, err := boc.DeserializeSingleRootBoc(account.Code)
+		if err != nil {
+			return nil, toError(http.StatusBadRequest, err)
+		}
+		code = *codeP
+	} else if m.Init.Exists && m.Init.Value.Value.Code.Exists {
+		code = m.Init.Value.Value.Code.Value.Value
+	} else if err == nil || errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusBadRequest, fmt.Errorf("code not found and message doesn't have init"))
 	} else {
-		return nil, toError(http.StatusInternalServerError, err)
+		return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s GetRawAccount err: %w", walletAddress.ToRaw(), err))
 	}
-	walletVersion, err := wallet.GetVersionByCode(code)
+	walletVersion, err := tongoWallet.GetVersionByCode(code)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
 	risk, err := wallet.ExtractRisk(walletVersion, msgCell)
 	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	configBase64, err := h.storage.TrimmedConfigBase64()
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
+		return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s GetVersionByCode err: %w", walletAddress.ToRaw(), err))
 	}
 
-	options := []txemulator.TraceOption{
-		txemulator.WithConfigBase64(configBase64),
-		txemulator.WithAccountsSource(h.storage),
-		txemulator.WithLimit(1100),
-	}
-	accounts, err := convertEmulationParameters(request.Params)
+	hash := m.Hash(true).Hex()
+	trace, version, _, err := h.storage.GetTraceWithState(ctx, hash)
 	if err != nil {
-		return nil, toError(http.StatusBadRequest, err)
+		h.logger.Warn("get trace from storage: ", zap.Error(err))
+		savedEmulatedTraces.WithLabelValues("error_restore").Inc()
 	}
-	var states []tlb.ShardAccount
-	for accountID, balance := range accounts {
-		originalState, err := h.storage.GetAccountState(ctx, accountID)
-		if err != nil {
-			return nil, toError(http.StatusInternalServerError, err)
+	if trace == nil || h.tongoVersion == 0 || version > h.tongoVersion {
+		if version > h.tongoVersion {
+			savedEmulatedTraces.WithLabelValues("expired").Inc()
 		}
-		state, err := prepareAccountState(*walletAddress, originalState, balance)
+		configBase64, err := h.storage.TrimmedConfigBase64()
 		if err != nil {
-			return nil, toError(http.StatusInternalServerError, err)
+			return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s TrimmedConfigBase64 err: %w", walletAddress.ToRaw(), err))
 		}
-		states = append(states, state)
+
+		options := []txemulator.TraceOption{
+			txemulator.WithConfigBase64(configBase64),
+			txemulator.WithAccountsSource(h.storage),
+			txemulator.WithLimit(1100),
+			txemulator.WithIgnoreSignatureDepth(1),
+		}
+		accounts, err := convertEmulationParameters(request.Params)
+		if err != nil {
+			return nil, toError(http.StatusBadRequest, err)
+		}
+		var states []tlb.ShardAccount
+		for accountID, balance := range accounts {
+			originalState, err := h.storage.GetAccountState(ctx, accountID)
+			if err != nil {
+				return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s GetAccountState err: %w", walletAddress.ToRaw(), err))
+			}
+			state, err := prepareAccountState(*walletAddress, originalState, balance)
+			if err != nil {
+				return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s prepareAccountState err: %w", walletAddress.ToRaw(), err))
+			}
+			states = append(states, state)
+		}
+
+		options = append(options, txemulator.WithAccounts(states...))
+		emulator, err := txemulator.NewTraceBuilder(options...)
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s NewTraceBuilder err: %w", walletAddress.ToRaw(), err))
+		}
+		tree, emulationErr := emulator.Run(ctx, m)
+		if emulationErr != nil {
+			if saveErr := h.storage.SaveEmulationError(ctx, msgCell, hash, emulationErr); saveErr != nil {
+				h.logger.Warn("failure to save emulation error: ", zap.Error(saveErr))
+			}
+			return nil, toProperEmulationError(emulationErr)
+		}
+		trace, err = EmulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool, true)
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s EmulatedTreeToTrace err: %w", walletAddress.ToRaw(), err))
+		}
+		h.saveTraceWithState(ctx, trace, msgCell, hash)
+	} else {
+		savedEmulatedTraces.WithLabelValues("restored").Inc()
 	}
-	options = append(options, txemulator.WithAccounts(states...))
-	emulator, err := txemulator.NewTraceBuilder(options...)
+	t := h.convertTrace(trace, h.addressBook)
+	actions, err := bath.FindActions(ctx, trace, bath.ForAccount(*walletAddress), bath.WithInformationSource(h.storage), bath.WithAddressBook(h.addressBook))
 	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	tree, err := emulator.Run(ctx, m)
-	if err != nil {
-		return nil, toProperEmulationError(err)
-	}
-	trace, err := emulatedTreeToTrace(ctx, h.executor, h.storage, tree, emulator.FinalStates(), nil, h.configPool)
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	t := convertTrace(trace, h.addressBook)
-	actions, err := bath.FindActions(ctx, trace, bath.ForAccount(*walletAddress), bath.WithInformationSource(h.storage))
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
+		return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s FindActions err: %w", walletAddress.ToRaw(), err))
 	}
 	result := bath.EnrichWithIntentions(trace, actions)
 	event, err := h.toAccountEvent(ctx, *walletAddress, trace, result, params.AcceptLanguage, true)
 	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
+		return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s toAccountEvent err: %w", walletAddress.ToRaw(), err))
 	}
-	oasRisk, err := h.convertRisk(ctx, *risk, *walletAddress)
+	oasRisk, err := h.convertRisk(ctx, *risk, *walletAddress, g.UnOpt(params.Currency))
 	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
+		return nil, toError(http.StatusInternalServerError, fmt.Errorf("account: %s convertRisk err: %w", walletAddress.ToRaw(), err))
 	}
 	consequences := oas.MessageConsequences{
 		Trace: t,
@@ -662,4 +857,18 @@ func (h *Handler) EmulateMessageToWallet(ctx context.Context, request *oas.Emula
 		Risk:  oasRisk,
 	}
 	return &consequences, nil
+}
+
+func getPendingLimits(limit int) int {
+	if limit >= 20 {
+		// show at least 10 finalized events
+		return limit - 10
+	} else if limit >= 10 {
+		return limit - 5
+	} else if limit >= 5 {
+		return limit - 2
+	} else if limit >= 1 {
+		return limit - 1
+	}
+	return 0
 }

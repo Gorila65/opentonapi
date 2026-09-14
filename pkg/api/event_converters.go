@@ -3,19 +3,27 @@ package api
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"go.uber.org/zap"
+	"log/slog"
+	"math"
 	"math/big"
+	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	imgGenerator "github.com/tonkeeper/opentonapi/pkg/image"
+	"go.uber.org/zap"
 
 	"github.com/tonkeeper/tongo/ton"
 
 	"github.com/tonkeeper/opentonapi/pkg/references"
 
 	"github.com/tonkeeper/tongo"
-	"golang.org/x/exp/slices"
 
 	"github.com/tonkeeper/opentonapi/internal/g"
 	"github.com/tonkeeper/opentonapi/pkg/api/i18n"
@@ -25,8 +33,16 @@ import (
 	"github.com/tonkeeper/opentonapi/pkg/wallet"
 )
 
+var unknownEventCounterVec = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "unknown_account_event_method_called_total",
+		Help: "Total number of times toUnknownAccountEvent method was called",
+	},
+)
+
 func distinctAccounts(skip *tongo.AccountID, book addressBook, accounts ...*tongo.AccountID) []oas.AccountAddress {
-	okAccounts := make([]*tongo.AccountID, 0, len(accounts))
+	seen := make(map[*tongo.AccountID]struct{}, len(accounts))
+	result := make([]oas.AccountAddress, 0, len(accounts))
 	for _, account := range accounts {
 		if account == nil {
 			continue
@@ -34,20 +50,38 @@ func distinctAccounts(skip *tongo.AccountID, book addressBook, accounts ...*tong
 		if skip != nil && *skip == *account {
 			continue
 		}
-		if slices.Contains(okAccounts, account) {
+		if _, ok := seen[account]; ok {
 			continue
 		}
-		okAccounts = append(okAccounts, account)
-	}
-	result := make([]oas.AccountAddress, 0, len(okAccounts))
-	for _, account := range okAccounts {
+		seen[account] = struct{}{}
 		result = append(result, convertAccountAddress(*account, book))
 	}
 	return result
 }
 
-func convertTrace(t *core.Trace, book addressBook) oas.Trace {
-	trace := oas.Trace{Transaction: convertTransaction(t.Transaction, t.AccountInterfaces, book), Interfaces: g.ToStrings(t.AccountInterfaces)}
+func (h *Handler) convertTrace(t *core.Trace, book addressBook) oas.Trace {
+	// A trace that originated from a blacklisted (scam) account is scam in its
+	// entirety: the flag is set on the root transaction and propagated to every
+	// transaction in the tree.
+	originTrust := h.spamFilter.AccountTrust(t.Transaction.Account)
+	return h.convertTraceEx(t, book, originTrust)
+}
+
+func (h *Handler) convertTraceEx(t *core.Trace, book addressBook, trust core.TrustType) oas.Trace {
+	trace := oas.Trace{
+		Transaction: h.convertTransaction(t.Transaction, t.AccountInterfaces, book),
+		Interfaces:  g.ToStrings(t.AccountInterfaces),
+		Emulated:    oas.OptBool{Set: true, Value: t.Emulated},
+	}
+	// trust is inherited from an ancestor; convertTransaction may also have flagged
+	// this transaction on its own (e.g. its direct sender is blacklisted).
+	if trust == core.TrustBlacklist {
+		trace.Transaction.Account.IsScam = true
+	}
+	childTrust := trust
+	if trace.Transaction.Account.IsScam {
+		childTrust = core.TrustBlacklist
+	}
 
 	sort.Slice(t.Children, func(i, j int) bool {
 		if t.Children[i].InMsg == nil || t.Children[j].InMsg == nil {
@@ -56,34 +90,75 @@ func convertTrace(t *core.Trace, book addressBook) oas.Trace {
 		return t.Children[i].InMsg.CreatedLt < t.Children[j].InMsg.CreatedLt
 	})
 	for _, c := range t.Children {
-		trace.Children = append(trace.Children, convertTrace(c, book))
+		trace.Children = append(trace.Children, h.convertTraceEx(c, book, childTrust))
 	}
 	return trace
 }
 
-func (h *Handler) convertRisk(ctx context.Context, risk wallet.Risk, walletAddress tongo.AccountID) (oas.Risk, error) {
+func (h *Handler) convertRisk(ctx context.Context, risk wallet.Risk, walletAddress tongo.AccountID, currency *string) (oas.Risk, error) {
+	if int64(risk.Gram) < 0 {
+		return oas.Risk{}, fmt.Errorf("ivalid ton amount")
+	}
+	total := float64(risk.Gram) / 1e9
+	var curPrice float64
+	var todayRates map[string]float64
+	var err error
+	currencyKnown := currency != nil
+	if currency != nil {
+		todayRates, _, _, _, err = h.getRates()
+		if err != nil {
+			return oas.Risk{}, fmt.Errorf("can't calculate risk: %w", err)
+		}
+		var prs bool
+		curPrice, prs = todayRates[strings.ToUpper(*currency)]
+		if !prs {
+			h.logger.Warn("can't calculate risk: unknown currency", zap.String("currency", *currency))
+			currencyKnown = false
+		}
+	}
+	if risk.TransferAllRemainingBalance {
+		a, err := h.storage.GetRawAccount(ctx, walletAddress)
+		if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
+			return oas.Risk{}, err
+		}
+		if a != nil && a.GramBalance > int64(risk.Gram) {
+			total = float64(a.GramBalance) / 1e9
+		}
+	}
 	oasRisk := oas.Risk{
 		TransferAllRemainingBalance: risk.TransferAllRemainingBalance,
-		// TODO: verify there is no overflow
-		Ton:     int64(risk.Ton),
+		Ton: oas.OptInt64{
+			Value: int64(risk.Gram),
+			Set:   true,
+		},
+		Gram:    int64(risk.Gram),
 		Jettons: nil,
 		Nfts:    nil,
 	}
 	for jetton, quantity := range risk.Jettons {
-		jettonWallets, err := h.storage.GetJettonWalletsByOwnerAddress(ctx, walletAddress, &jetton, false, true)
+		jettonWallets, err := h.storage.GetJettonWalletsByOwnerAddress(ctx, walletAddress, &jetton, false, true, 0, 0)
 		if err != nil || len(jettonWallets) == 0 {
 			continue
 		}
 		jettonWallet := jettonWallets[0]
 		meta := h.GetJettonNormalizedMetadata(ctx, jettonWallet.JettonAddress)
 		score, _ := h.score.GetJettonScore(jettonWallet.JettonAddress)
-		preview := jettonPreview(jettonWallet.JettonAddress, meta, score)
+		scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, jettonWallet.JettonAddress, nil)
+		if err != nil {
+			return oas.Risk{}, toError(http.StatusInternalServerError, err)
+		}
+		preview := jettonPreview(jettonWallet.JettonAddress, meta, score, scaledUiParams)
+		f, _ := quantity.Float64()
+		total += f / math.Pow10(preview.Decimals) * todayRates[jettonWallet.JettonAddress.ToRaw()]
 		jettonQuantity := oas.JettonQuantity{
 			Quantity:      quantity.String(),
 			WalletAddress: convertAccountAddress(jettonWallet.Address, h.addressBook),
 			Jetton:        preview,
 		}
 		oasRisk.Jettons = append(oasRisk.Jettons, jettonQuantity)
+	}
+	if currencyKnown {
+		oasRisk.TotalEquivalent = oas.NewOptFloat32(float32(total / curPrice))
 	}
 	if len(risk.Nfts) > 0 {
 		var wg sync.WaitGroup
@@ -148,12 +223,12 @@ func (h *Handler) convertActionTonTransfer(t *bath.TonTransferAction, acceptLang
 			Origin: t.Refund.Origin,
 		})
 	}
-	value := i18n.FormatTONs(t.Amount)
+	value := i18n.FormatGrams(t.Amount)
 	simplePreview := oas.ActionSimplePreview{
-		Name: "Ton Transfer",
+		Name: "Gram Transfer",
 		Description: i18n.T(acceptLanguage, i18n.C{
 			DefaultMessage: &i18n.M{
-				ID:    "tonTransferAction",
+				ID:    "gramTransferAction",
 				Other: "Transferring {{.Value}}",
 			},
 			TemplateData: i18n.Template{
@@ -183,12 +258,12 @@ func (h *Handler) convertActionExtraCurrencyTransfer(t *bath.ExtraCurrencyTransf
 			Image:    meta.Image,
 		},
 	})
-	value := ScaleJettons(big.Int(t.Amount), meta.Decimals)
+	value := i18n.FormatTokens(big.Int(t.Amount), int32(meta.Decimals), meta.Symbol, nil)
 	simplePreview := oas.ActionSimplePreview{
 		Name:        "Extra Currency Transfer",
 		Description: "", // TODO: add description
 		Accounts:    distinctAccounts(viewer, h.addressBook, &t.Sender, &t.Recipient),
-		Value:       oas.NewOptString(fmt.Sprintf("%v %v", value.String(), meta.Symbol)),
+		Value:       oas.NewOptString(value),
 	}
 	return action, simplePreview
 }
@@ -216,10 +291,14 @@ func (h *Handler) convertActionNftTransfer(t *bath.NftTransferAction, acceptLang
 	return action, simplePreview
 }
 
-func (h *Handler) convertActionJettonTransfer(ctx context.Context, t *bath.JettonTransferAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptJettonTransferAction, oas.ActionSimplePreview) {
+func (h *Handler) convertActionJettonTransfer(ctx context.Context, t *bath.JettonTransferAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptJettonTransferAction, oas.ActionSimplePreview, error) {
 	meta := h.GetJettonNormalizedMetadata(ctx, t.Jetton)
 	score, _ := h.score.GetJettonScore(t.Jetton)
-	preview := jettonPreview(t.Jetton, meta, score)
+	scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, t.Jetton, &eventLt)
+	if err != nil {
+		return oas.OptJettonTransferAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+	}
+	preview := jettonPreview(t.Jetton, meta, score, scaledUiParams)
 	var action oas.OptJettonTransferAction
 	action.SetTo(oas.JettonTransferAction{
 		Amount:           g.Pointer(big.Int(t.Amount)).String(),
@@ -231,34 +310,74 @@ func (h *Handler) convertActionJettonTransfer(ctx context.Context, t *bath.Jetto
 		Comment:          g.Opt(t.Comment),
 		EncryptedComment: convertEncryptedComment(t.EncryptedComment),
 	})
-	amount := Scale(t.Amount, meta.Decimals)
-	amountString := amount.String()
-
+	value := i18n.FormatTokens(big.Int(t.Amount), int32(meta.Decimals), meta.Symbol, scaledUiParams)
 	simplePreview := oas.ActionSimplePreview{
 		Name: "Jetton Transfer",
 		Description: i18n.T(acceptLanguage, i18n.C{
 			DefaultMessage: &i18n.M{
 				ID:    "jettonTransferAction",
-				Other: "Transferring {{.Value}} {{.JettonName}}",
+				Other: "Transferring {{.Value}}",
 			},
 			TemplateData: i18n.Template{
-				"Value":      amountString,
-				"JettonName": meta.Name,
+				"Value": value,
 			},
 		}),
 		Accounts: distinctAccounts(viewer, h.addressBook, t.Recipient, t.Sender, &t.Jetton),
-		Value:    oas.NewOptString(fmt.Sprintf("%v %v", amountString, meta.Name)),
+		Value:    oas.NewOptString(value),
 	}
 	if len(preview.Image) > 0 {
 		simplePreview.ValueImage = oas.NewOptString(preview.Image)
 	}
-	return action, simplePreview
+	return action, simplePreview, nil
 }
 
-func (h *Handler) convertActionJettonMint(ctx context.Context, m *bath.JettonMintAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptJettonMintAction, oas.ActionSimplePreview) {
+func (h *Handler) convertActionFlawedJettonTransfer(ctx context.Context, t *bath.FlawedJettonTransferAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptFlawedJettonTransferAction, oas.ActionSimplePreview, error) {
+	meta := h.GetJettonNormalizedMetadata(ctx, t.Jetton)
+	score, _ := h.score.GetJettonScore(t.Jetton)
+	preview := jettonPreview(t.Jetton, meta, score, nil)
+	var action oas.OptFlawedJettonTransferAction
+	action.SetTo(oas.FlawedJettonTransferAction{
+		SentAmount:       g.Pointer(big.Int(t.SentAmount)).String(),
+		ReceivedAmount:   g.Pointer(big.Int(t.ReceivedAmount)).String(),
+		Recipient:        convertOptAccountAddress(t.Recipient, h.addressBook),
+		Sender:           convertOptAccountAddress(t.Sender, h.addressBook),
+		Jetton:           preview,
+		RecipientsWallet: t.RecipientsWallet.ToRaw(),
+		SendersWallet:    t.SendersWallet.ToRaw(),
+		Comment:          g.Opt(t.Comment),
+		EncryptedComment: convertEncryptedComment(t.EncryptedComment),
+	})
+	transferredValue := i18n.FormatTokens(big.Int(t.SentAmount), int32(meta.Decimals), meta.Symbol, nil)
+	receivedValue := i18n.FormatTokens(big.Int(t.ReceivedAmount), int32(meta.Decimals), meta.Symbol, nil)
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Jetton Transfer",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "flawedJettonTransferAction",
+				Other: "Transferred {{.TransferredValue}}, but received {{.ReceivedValue}}",
+			},
+			TemplateData: i18n.Template{
+				"TransferredValue": transferredValue,
+				"ReceivedValue":    receivedValue,
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, t.Recipient, t.Sender, &t.Jetton),
+		Value:    oas.NewOptString(receivedValue),
+	}
+	if len(preview.Image) > 0 {
+		simplePreview.ValueImage = oas.NewOptString(preview.Image)
+	}
+	return action, simplePreview, nil
+}
+
+func (h *Handler) convertActionJettonMint(ctx context.Context, m *bath.JettonMintAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptJettonMintAction, oas.ActionSimplePreview, error) {
 	meta := h.GetJettonNormalizedMetadata(ctx, m.Jetton)
 	score, _ := h.score.GetJettonScore(m.Jetton)
-	preview := jettonPreview(m.Jetton, meta, score)
+	scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, m.Jetton, &eventLt)
+	if err != nil {
+		return oas.OptJettonMintAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+	}
+	preview := jettonPreview(m.Jetton, meta, score, scaledUiParams)
 	var action oas.OptJettonMintAction
 	action.SetTo(oas.JettonMintAction{
 		Amount:           g.Pointer(big.Int(m.Amount)).String(),
@@ -267,89 +386,52 @@ func (h *Handler) convertActionJettonMint(ctx context.Context, m *bath.JettonMin
 		RecipientsWallet: m.RecipientsWallet.ToRaw(),
 	})
 
-	amount := Scale(m.Amount, meta.Decimals).String()
+	value := i18n.FormatTokens(big.Int(m.Amount), int32(meta.Decimals), meta.Symbol, scaledUiParams)
 	simplePreview := oas.ActionSimplePreview{
 		Name: "Jetton Mint",
 		Description: i18n.T(acceptLanguage, i18n.C{
 			DefaultMessage: &i18n.M{
 				ID:    "jettonMintAction",
-				Other: "Minting {{.Value}} {{.JettonName}}",
+				Other: "Minting {{.Value}}",
 			},
 			TemplateData: i18n.Template{
-				"Value":      amount,
-				"JettonName": meta.Name,
+				"Value": value,
 			},
 		}),
 		Accounts: distinctAccounts(viewer, h.addressBook, &m.Jetton, &m.Recipient),
-		Value:    oas.NewOptString(fmt.Sprintf("%v %v", amount, meta.Name)),
+		Value:    oas.NewOptString(value),
 	}
 	if len(preview.Image) > 0 {
 		simplePreview.ValueImage = oas.NewOptString(preview.Image)
 	}
-	return action, simplePreview
+	return action, simplePreview, nil
 }
 
-func (h *Handler) convertActionInscriptionMint(ctx context.Context, m *bath.InscriptionMintAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptInscriptionMintAction, oas.ActionSimplePreview) {
-	var action oas.OptInscriptionMintAction
-	action.SetTo(oas.InscriptionMintAction{
-		Recipient: convertAccountAddress(m.Minter, h.addressBook),
-		Amount:    fmt.Sprintf("%v", m.Amount),
-		Type:      oas.InscriptionMintActionType(m.Type),
-		Ticker:    m.Ticker,
-		Decimals:  9,
-	})
-	amount := fmt.Sprintf("%v", m.Amount/1_000_000_000)
-	simplePreview := oas.ActionSimplePreview{
-		Name: "Inscription Mint",
-		Description: i18n.T(acceptLanguage, i18n.C{
-			DefaultMessage: &i18n.M{
-				ID:    "inscriptionMintAction",
-				Other: "Minting {{.Value}} {{.Ticker}}",
-			},
-			TemplateData: i18n.Template{
-				"Value":  amount,
-				"Ticker": m.Ticker,
-			},
-		}),
-		Accounts: distinctAccounts(viewer, h.addressBook, &m.Minter),
-		Value:    oas.NewOptString(fmt.Sprintf("%v %v", amount, m.Ticker)),
+func (h *Handler) formatPrice(ctx context.Context, amount core.Price, eventLt int64) (value string, price oas.OptPrice, err error) {
+	p := h.convertPrice(ctx, amount)
+	scaledUiParams, err := h.scaledUIParamsFromPrice(ctx, amount, &eventLt)
+	if err != nil {
+		return "", oas.OptPrice{}, err
 	}
-	return action, simplePreview
-}
-
-func (h *Handler) convertActionInscriptionTransfer(ctx context.Context, t *bath.InscriptionTransferAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptInscriptionTransferAction, oas.ActionSimplePreview) {
-	var action oas.OptInscriptionTransferAction
-	action.SetTo(oas.InscriptionTransferAction{
-		Recipient: convertAccountAddress(t.Dst, h.addressBook),
-		Sender:    convertAccountAddress(t.Src, h.addressBook),
-		Amount:    fmt.Sprintf("%v", t.Amount),
-		Type:      oas.InscriptionTransferActionType(t.Type),
-		Ticker:    t.Ticker,
-		Decimals:  9,
-	})
-	amount := fmt.Sprintf("%v", t.Amount/1_000_000_000)
-	simplePreview := oas.ActionSimplePreview{
-		Name: "Inscription Transfer",
-		Description: i18n.T(acceptLanguage, i18n.C{
-			DefaultMessage: &i18n.M{
-				ID:    "inscriptionTransferAction",
-				Other: "Transferring {{.Value}} {{.Ticker}}",
-			},
-			TemplateData: i18n.Template{
-				"Value":  amount,
-				"Ticker": t.Ticker,
-			},
-		}),
-		Accounts: distinctAccounts(viewer, h.addressBook, &t.Src, &t.Dst),
-		Value:    oas.NewOptString(fmt.Sprintf("%v %v", amount, t.Ticker)),
+	if amount.Currency.Type == core.CurrencyNative {
+		return i18n.FormatGrams(amount.Amount.Int64()), oas.NewOptPrice(p), nil
 	}
-	return action, simplePreview
+	return i18n.FormatTokens(amount.Amount, int32(p.Decimals), p.TokenName, scaledUiParams), oas.NewOptPrice(p), nil
 }
 
-func (h *Handler) convertDepositStake(d *bath.DepositStakeAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptDepositStakeAction, oas.ActionSimplePreview) {
+func (h *Handler) convertDepositStake(ctx context.Context, d *bath.DepositStakeAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptDepositStakeAction, oas.ActionSimplePreview, error) {
+	value, stakeMeta, err := h.formatPrice(ctx, d.Amount, eventLt)
+	if err != nil {
+		return oas.OptDepositStakeAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+	}
+	tonAmount := int64(0)
+	if d.Amount.Currency.Type == core.CurrencyNative {
+		tonAmount = d.Amount.Amount.Int64()
+	}
 	var action oas.OptDepositStakeAction
 	action.SetTo(oas.DepositStakeAction{
-		Amount:         d.Amount,
+		Amount:         tonAmount,
+		StakeMeta:      stakeMeta,
 		Staker:         convertAccountAddress(d.Staker, h.addressBook),
 		Pool:           convertAccountAddress(d.Pool, h.addressBook),
 		Implementation: oas.PoolImplementationType(d.Implementation),
@@ -361,28 +443,36 @@ func (h *Handler) convertDepositStake(d *bath.DepositStakeAction, acceptLanguage
 				ID:    "depositStakeAction",
 				Other: "Deposit {{.Value}} to staking pool",
 			},
-			TemplateData: i18n.Template{
-				"Value": i18n.FormatTONs(d.Amount),
-			},
+			TemplateData: i18n.Template{"Value": value},
 		}),
 		Accounts: distinctAccounts(viewer, h.addressBook, &d.Staker, &d.Pool),
-		Value:    oas.NewOptString(i18n.FormatTONs(d.Amount)),
+		Value:    oas.NewOptString(value),
 	}
-	return action, simplePreview
+	return action, simplePreview, nil
 }
 
-func (h *Handler) convertWithdrawStakeRequest(d *bath.WithdrawStakeRequestAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptWithdrawStakeRequestAction, oas.ActionSimplePreview) {
+func (h *Handler) convertWithdrawStakeRequest(ctx context.Context, d *bath.WithdrawStakeRequestAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptWithdrawStakeRequestAction, oas.ActionSimplePreview, error) {
+	var stakeMeta oas.OptPrice
+	var tonAmount oas.OptInt64
 	var action oas.OptWithdrawStakeRequestAction
+	value := "ALL"
+	if d.Amount != nil {
+		var err error
+		value, stakeMeta, err = h.formatPrice(ctx, *d.Amount, eventLt)
+		if err != nil {
+			return oas.OptWithdrawStakeRequestAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+		}
+		if d.Amount.Currency.Type == core.CurrencyNative {
+			tonAmount = oas.NewOptInt64(d.Amount.Amount.Int64())
+		}
+	}
 	action.SetTo(oas.WithdrawStakeRequestAction{
-		Amount:         g.Opt(d.Amount),
+		Amount:         tonAmount,
+		StakeMeta:      stakeMeta,
 		Staker:         convertAccountAddress(d.Staker, h.addressBook),
 		Pool:           convertAccountAddress(d.Pool, h.addressBook),
 		Implementation: oas.PoolImplementationType(d.Implementation),
 	})
-	value := "ALL"
-	if d.Amount != nil {
-		value = i18n.FormatTONs(*d.Amount)
-	}
 	simplePreview := oas.ActionSimplePreview{
 		Name: "Withdraw Stake Request",
 		Description: i18n.T(acceptLanguage, i18n.C{
@@ -395,10 +485,7 @@ func (h *Handler) convertWithdrawStakeRequest(d *bath.WithdrawStakeRequestAction
 		Accounts: distinctAccounts(viewer, h.addressBook, &d.Staker, &d.Pool),
 		Value:    oas.NewOptString(value),
 	}
-	if d.Amount != nil {
-		simplePreview.Value = oas.NewOptString(i18n.FormatTONs(*d.Amount))
-	}
-	return action, simplePreview
+	return action, simplePreview, nil
 }
 
 func (h *Handler) convertWithdrawStake(d *bath.WithdrawStakeAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptWithdrawStakeAction, oas.ActionSimplePreview) {
@@ -416,10 +503,87 @@ func (h *Handler) convertWithdrawStake(d *bath.WithdrawStakeAction, acceptLangua
 				ID:    "withdrawStakeAction",
 				Other: "Withdraw {{.Value}} from staking pool",
 			},
-			TemplateData: i18n.Template{"Value": i18n.FormatTONs(d.Amount)},
+			TemplateData: i18n.Template{"Value": i18n.FormatGrams(d.Amount)},
 		}),
 		Accounts: distinctAccounts(viewer, h.addressBook, &d.Staker, &d.Pool),
-		Value:    oas.NewOptString(i18n.FormatTONs(d.Amount)),
+		Value:    oas.NewOptString(i18n.FormatGrams(d.Amount)),
+	}
+	return action, simplePreview
+}
+
+func (h *Handler) convertDepositTokenStake(ctx context.Context, d *bath.DepositTokenStakeAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptDepositTokenStakeAction, oas.ActionSimplePreview, error) {
+	p := h.convertPrice(ctx, *d.StakeMeta)
+	var price oas.OptPrice
+	price.SetTo(p)
+
+	scaledUiParams, err := h.scaledUIParamsFromPrice(ctx, *d.StakeMeta, &eventLt)
+	if err != nil {
+		return oas.OptDepositTokenStakeAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+	}
+
+	var image oas.OptString
+	if d.Protocol.Image != nil {
+		image = oas.NewOptString(imgGenerator.DefaultGenerator.GenerateImageUrl(*d.Protocol.Image, 200, 200))
+	}
+
+	var action oas.OptDepositTokenStakeAction
+	action.SetTo(oas.DepositTokenStakeAction{
+		Staker: convertAccountAddress(d.Staker, h.addressBook),
+		Protocol: oas.Protocol{
+			Name:  d.Protocol.Name,
+			Image: image,
+		},
+		StakeMeta: price,
+	})
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Deposit Token Stake",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "depositTokenStakeAction",
+				Other: "Staked with {{.Protocol}} protocol",
+			},
+			TemplateData: i18n.Template{
+				"Protocol": d.Protocol.Name,
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &d.Staker, d.StakeMeta.Currency.Jetton),
+		Value:    oas.NewOptString(i18n.FormatTokens(d.StakeMeta.Amount, int32(p.Decimals), p.TokenName, scaledUiParams)),
+	}
+	return action, simplePreview, nil
+}
+
+func (h *Handler) convertWithdrawTokenStakeRequest(ctx context.Context, w *bath.WithdrawTokenStakeRequestAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptWithdrawTokenStakeRequestAction, oas.ActionSimplePreview) {
+	p := h.convertPrice(ctx, *w.StakeMeta)
+	var price oas.OptPrice
+	price.SetTo(p)
+
+	var image oas.OptString
+	if w.Protocol.Image != nil {
+		image = oas.NewOptString(imgGenerator.DefaultGenerator.GenerateImageUrl(*w.Protocol.Image, 200, 200))
+	}
+
+	var action oas.OptWithdrawTokenStakeRequestAction
+	action.SetTo(oas.WithdrawTokenStakeRequestAction{
+		Staker: convertAccountAddress(w.Staker, h.addressBook),
+		Protocol: oas.Protocol{
+			Name:  w.Protocol.Name,
+			Image: image,
+		},
+		StakeMeta: price,
+	})
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Withdraw Token Stake",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "withdrawTokenStakeAction",
+				Other: "Request to withdraw from {{.Protocol}} protocol",
+			},
+			TemplateData: i18n.Template{
+				"Protocol": w.Protocol.Name,
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &w.Staker, w.StakeMeta.Currency.Jetton),
+		Value:    oas.NewOptString("ALL"),
 	}
 	return action, simplePreview
 }
@@ -451,7 +615,237 @@ func (h *Handler) convertDomainRenew(ctx context.Context, d *bath.DnsRenewAction
 	return action, simplePreview
 }
 
-func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a bath.Action, acceptLanguage oas.OptString) (oas.Action, error) {
+func (h *Handler) convertPurchaseAction(ctx context.Context, p *bath.PurchaseAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptPurchaseAction, oas.ActionSimplePreview, error) {
+	price := h.convertPrice(ctx, p.Price)
+	currency := ""
+	scaledUiParams, err := h.scaledUIParamsFromPrice(ctx, p.Price, &eventLt)
+	if err != nil {
+		return oas.OptPurchaseAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+	}
+	switch p.Price.Currency.Type {
+	case core.CurrencyJetton:
+		currency = p.Price.Currency.Jetton.ToRaw()
+	case core.CurrencyExtra:
+		currency = fmt.Sprintf("%d", int64(uint32(*p.Price.Currency.CurrencyID))) // in db as uint32
+	}
+	purchaseAction := oas.PurchaseAction{
+		Source:      convertAccountAddress(p.Source, h.addressBook),
+		Destination: convertAccountAddress(p.Destination, h.addressBook),
+		InvoiceID:   p.InvoiceID.String(),
+		Amount:      price,
+	}
+	value := i18n.FormatTokens(p.Price.Amount, int32(price.Decimals), price.TokenName, scaledUiParams)
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Purchase",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "purchaseAction",
+				Other: "Payment for invoice #{{.InvoiceID}}",
+			},
+			TemplateData: i18n.Template{
+				"InvoiceID": p.InvoiceID.String(),
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &p.Source, &p.Destination),
+		Value:    oas.NewOptString(value),
+	}
+	inv, err := h.storage.GetInvoice(ctx, p.Source, p.Destination, p.InvoiceID, currency)
+	if err == nil {
+		meta, err := convertMetadata(inv.Metadata, nil)
+		if err == nil {
+			purchaseAction.Metadata = meta
+		}
+	}
+	var action oas.OptPurchaseAction
+	action.SetTo(purchaseAction)
+	return action, simplePreview, nil
+}
+
+func (h *Handler) convertLiquidityDepositAction(ctx context.Context, l *bath.LiquidityDepositAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptLiquidityDepositAction, oas.ActionSimplePreview, error) {
+	tokens := make([]oas.VaultDepositInfo, 0)
+	for _, token := range l.Tokens {
+		price := h.convertPrice(ctx, token.Price)
+		vaultDepositInfo := oas.VaultDepositInfo{
+			Price: price,
+			Vault: token.Vault.ToRaw(),
+		}
+		tokens = append(tokens, vaultDepositInfo)
+	}
+	liquidityDepositAction := oas.LiquidityDepositAction{
+		Protocol: oas.Protocol{
+			Name:  l.Protocol.Name,
+			Image: oas.NewOptString(imgGenerator.DefaultGenerator.GenerateImageUrl(*l.Protocol.Image, 200, 200)),
+		},
+		From:   convertAccountAddress(l.From, h.addressBook),
+		Tokens: tokens,
+	}
+	scaledUiParamsToken0, err := h.scaledUIParamsFromPrice(ctx, l.Tokens[0].Price, &eventLt)
+	if err != nil {
+		return oas.OptLiquidityDepositAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+	}
+	value := i18n.FormatTokens(l.Tokens[0].Price.Amount, int32(tokens[0].Price.Decimals), tokens[0].Price.TokenName, scaledUiParamsToken0)
+	if len(tokens) == 2 {
+		scaledUiParamsToken1, err := h.scaledUIParamsFromPrice(ctx, l.Tokens[1].Price, &eventLt)
+		if err != nil {
+			return oas.OptLiquidityDepositAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+		}
+		value += " + " + i18n.FormatTokens(l.Tokens[1].Price.Amount, int32(tokens[1].Price.Decimals), tokens[1].Price.TokenName, scaledUiParamsToken1)
+	}
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Liquidity Deposit",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "liquidityDepositAction",
+				Other: "Deposit liquidity into the {{.Protocol}} pool",
+			},
+			TemplateData: i18n.Template{
+				"Value":    value,
+				"Protocol": l.Protocol.Name,
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &l.From),
+		Value:    oas.NewOptString(value),
+	}
+	var action oas.OptLiquidityDepositAction
+	action.SetTo(liquidityDepositAction)
+	return action, simplePreview, nil
+}
+
+func (h *Handler) convertOracleRequestAction(o *bath.OracleRequestAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptOracleRequestAction, oas.ActionSimplePreview) {
+	priceFeeds := make([]oas.OraclePriceFeed, 0, len(o.PriceFeeds))
+	symbols := make([]string, 0, len(o.PriceFeeds))
+	rates := make([]string, 0, len(o.PriceFeeds))
+	for _, feed := range o.PriceFeeds {
+		priceFeed := oas.OraclePriceFeed{
+			ID:            feed.ID,
+			DisplaySymbol: feed.DisplaySymbol,
+		}
+		if feed.Rate != nil {
+			priceFeed.Rate.SetTo(*feed.Rate)
+			rates = append(rates, strconv.FormatFloat(*feed.Rate, 'g', 4, 64))
+		} else {
+			rates = append(rates, "-")
+		}
+		priceFeeds = append(priceFeeds, priceFeed)
+		if feed.DisplaySymbol != "" {
+			symbols = append(symbols, feed.DisplaySymbol)
+		}
+	}
+	description := strings.Join(symbols, ", ")
+	value := strings.Join(rates, ", ")
+	var action oas.OptOracleRequestAction
+	action.SetTo(oas.OracleRequestAction{
+		Requester:  convertAccountAddress(o.Requester, h.addressBook),
+		ResponseTo: convertAccountAddress(o.ResponseTo, h.addressBook),
+		PriceFeeds: priceFeeds,
+	})
+	simplePreview := oas.ActionSimplePreview{
+		Name:        "Oracle Request",
+		Description: description,
+		Value:       oas.NewOptString(value),
+		Accounts:    distinctAccounts(viewer, h.addressBook, &o.Requester, &o.Oracle, &o.ResponseTo),
+	}
+	return action, simplePreview
+}
+
+func (h *Handler) convertBuyXTRAction(ctx context.Context, d *bath.BuyXTRAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptBuyXTRAction, oas.ActionSimplePreview) {
+	price := h.convertPrice(ctx, core.Price{
+		Currency: core.Currency{
+			Type:   core.CurrencyJetton,
+			Jetton: &d.JettonMaster,
+		},
+		Amount: d.Amount,
+	})
+	buyXtrAction := oas.BuyXTRAction{
+		Recipient: convertAccountAddress(d.Recipient, h.addressBook),
+		Amount:    d.Amount.String(),
+	}
+	value := i18n.FormatTokens(d.Amount, int32(price.Decimals), price.TokenName, nil)
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Buy XTR",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "buyXtr",
+				Other: "Buy {{.Value}}",
+			},
+			TemplateData: i18n.Template{
+				"Value": value,
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &d.Recipient),
+		Value:    oas.NewOptString(value),
+	}
+	var action oas.OptBuyXTRAction
+	action.SetTo(buyXtrAction)
+	return action, simplePreview
+}
+
+func (h *Handler) convertDepositXTRAction(ctx context.Context, d *bath.DepositXTRAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptDepositXTRAction, oas.ActionSimplePreview) {
+	price := h.convertPrice(ctx, core.Price{
+		Currency: core.Currency{
+			Type:   core.CurrencyJetton,
+			Jetton: &d.JettonMaster,
+		},
+		Amount: d.Amount,
+	})
+	depositTestAction := oas.DepositXTRAction{
+		Recipient: convertAccountAddress(d.Recipient, h.addressBook),
+		Amount:    d.Amount.String(),
+	}
+	value := i18n.FormatTokens(d.Amount, int32(price.Decimals), price.TokenName, nil)
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Deposit XTR",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "depositXtr",
+				Other: "Depositing {{.Value}}",
+			},
+			TemplateData: i18n.Template{
+				"Value": value,
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &d.Recipient),
+		Value:    oas.NewOptString(value),
+	}
+	var action oas.OptDepositXTRAction
+	action.SetTo(depositTestAction)
+	return action, simplePreview
+}
+
+func (h *Handler) convertWithdrawXTRAction(ctx context.Context, w *bath.WithdrawXTRAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptWithdrawXTRAction, oas.ActionSimplePreview) {
+	price := h.convertPrice(ctx, core.Price{
+		Currency: core.Currency{
+			Type:   core.CurrencyJetton,
+			Jetton: &w.JettonMaster,
+		},
+		Amount: w.Amount,
+	})
+	depositTestAction := oas.WithdrawXTRAction{
+		User:   convertAccountAddress(w.User, h.addressBook),
+		Amount: w.Amount.String(),
+	}
+	value := i18n.FormatTokens(w.Amount, int32(price.Decimals), price.TokenName, nil)
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Withdraw XTR",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "withdrawXtr",
+				Other: "Withdrawing {{.Value}}",
+			},
+			TemplateData: i18n.Template{
+				"Value": value,
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &w.User),
+		Value:    oas.NewOptString(value),
+	}
+	var action oas.OptWithdrawXTRAction
+	action.SetTo(depositTestAction)
+	return action, simplePreview
+}
+
+func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a bath.Action, acceptLanguage oas.OptString, eventLt int64) (oas.Action, error) {
+	var err error
 	action := oas.Action{
 		Type:             oas.ActionType(a.Type),
 		BaseTransactions: make([]string, len(a.BaseTransactions)),
@@ -477,13 +871,28 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 	case bath.NftItemTransfer:
 		action.NftItemTransfer, action.SimplePreview = h.convertActionNftTransfer(a.NftItemTransfer, acceptLanguage.Value, viewer)
 	case bath.JettonTransfer:
-		action.JettonTransfer, action.SimplePreview = h.convertActionJettonTransfer(ctx, a.JettonTransfer, acceptLanguage.Value, viewer)
+		action.JettonTransfer, action.SimplePreview, err = h.convertActionJettonTransfer(ctx, a.JettonTransfer, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert jetton transfer action: %w", err)
+		}
+	case bath.FlawedJettonTransfer:
+		action.FlawedJettonTransfer, action.SimplePreview, err = h.convertActionFlawedJettonTransfer(ctx, a.FlawedJettonTransfer, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert flawed jetton transfer action: %w", err)
+		}
 	case bath.JettonMint:
-		action.JettonMint, action.SimplePreview = h.convertActionJettonMint(ctx, a.JettonMint, acceptLanguage.Value, viewer)
+		action.JettonMint, action.SimplePreview, err = h.convertActionJettonMint(ctx, a.JettonMint, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert jetton mint action: %w", err)
+		}
 	case bath.JettonBurn:
+		scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, a.JettonBurn.Jetton, &eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+		}
 		meta := h.GetJettonNormalizedMetadata(ctx, a.JettonBurn.Jetton)
 		score, _ := h.score.GetJettonScore(a.JettonBurn.Jetton)
-		preview := jettonPreview(a.JettonBurn.Jetton, meta, score)
+		preview := jettonPreview(a.JettonBurn.Jetton, meta, score, scaledUiParams)
 		action.JettonBurn.SetTo(oas.JettonBurnAction{
 			Amount:        g.Pointer(big.Int(a.JettonBurn.Amount)).String(),
 			Sender:        convertAccountAddress(a.JettonBurn.Sender, h.addressBook),
@@ -493,55 +902,28 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 		if len(preview.Image) > 0 {
 			action.SimplePreview.ValueImage = oas.NewOptString(preview.Image)
 		}
-		amount := Scale(a.JettonBurn.Amount, meta.Decimals).String()
+		value := i18n.FormatTokens(big.Int(a.JettonBurn.Amount), int32(meta.Decimals), meta.Symbol, scaledUiParams)
 		action.SimplePreview = oas.ActionSimplePreview{
 			Name: "Jetton Burn",
 			Description: i18n.T(acceptLanguage.Value, i18n.C{
 				DefaultMessage: &i18n.M{
 					ID:    "jettonBurnAction",
-					Other: "Burning {{.Value}} {{.JettonName}}",
-				},
-				TemplateData: i18n.Template{
-					"Value":      amount,
-					"JettonName": meta.Name,
-				},
-			}),
-			Accounts: distinctAccounts(viewer, h.addressBook, &a.JettonBurn.Sender, &a.JettonBurn.Jetton),
-			Value:    oas.NewOptString(fmt.Sprintf("%v %v", amount, meta.Name)),
-		}
-	case bath.InscriptionMint:
-		action.InscriptionMint, action.SimplePreview = h.convertActionInscriptionMint(ctx, a.InscriptionMint, acceptLanguage.Value, viewer)
-	case bath.InscriptionTransfer:
-		action.InscriptionTransfer, action.SimplePreview = h.convertActionInscriptionTransfer(ctx, a.InscriptionTransfer, acceptLanguage.Value, viewer)
-	case bath.Subscription:
-		action.Subscribe.SetTo(oas.SubscriptionAction{
-			Amount:       a.Subscription.Amount,
-			Beneficiary:  convertAccountAddress(a.Subscription.Beneficiary, h.addressBook),
-			Subscriber:   convertAccountAddress(a.Subscription.Subscriber, h.addressBook),
-			Subscription: a.Subscription.Subscription.ToRaw(),
-			Initial:      a.Subscription.First,
-		})
-		value := i18n.FormatTONs(a.Subscription.Amount)
-		action.SimplePreview = oas.ActionSimplePreview{
-			Name: "Subscription",
-			Description: i18n.T(acceptLanguage.Value, i18n.C{
-				DefaultMessage: &i18n.M{
-					ID:    "subscriptionAction",
-					Other: "Paying {{.Value}} for subscription",
+					Other: "Burning {{.Value}}",
 				},
 				TemplateData: i18n.Template{
 					"Value": value,
 				},
 			}),
-			Accounts: distinctAccounts(viewer, h.addressBook, &a.Subscription.Beneficiary, &a.Subscription.Subscriber),
+			Accounts: distinctAccounts(viewer, h.addressBook, &a.JettonBurn.Sender, &a.JettonBurn.Jetton),
 			Value:    oas.NewOptString(value),
 		}
-	case bath.UnSubscription:
-		action.UnSubscribe.SetTo(oas.UnSubscriptionAction{
-			Beneficiary:  convertAccountAddress(a.UnSubscription.Beneficiary, h.addressBook),
-			Subscriber:   convertAccountAddress(a.UnSubscription.Subscriber, h.addressBook),
-			Subscription: a.UnSubscription.Subscription.ToRaw(),
-		})
+	case bath.Subscribe:
+		action.Subscribe, action.SimplePreview, err = h.convertSubscribe(ctx, a.Subscribe, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert subscribe: %w", err)
+		}
+	case bath.UnSubscribe:
+		action.UnSubscribe, action.SimplePreview = h.convertUnsubscribe(ctx, a.UnSubscribe, acceptLanguage.Value, viewer)
 	case bath.ContractDeploy:
 		interfaces := make([]string, 0, len(a.ContractDeploy.Interfaces))
 		for _, iface := range a.ContractDeploy.Interfaces {
@@ -565,8 +947,12 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 			Accounts: distinctAccounts(viewer, h.addressBook, &a.ContractDeploy.Address),
 		}
 	case bath.NftPurchase:
-		price := a.NftPurchase.Price
-		value := i18n.FormatTONs(price)
+		price := h.convertPrice(ctx, a.NftPurchase.Price)
+		scaledUiParams, err := h.scaledUIParamsFromPrice(ctx, a.NftPurchase.Price, &eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+		}
+		value := i18n.FormatTokens(a.NftPurchase.Price.Amount, int32(price.Decimals), price.TokenName, scaledUiParams)
 		items, err := h.storage.GetNFTs(ctx, []tongo.AccountID{a.NftPurchase.Nft})
 		if err != nil {
 			return oas.Action{}, err
@@ -599,13 +985,13 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 		}
 		action.NftPurchase.SetTo(oas.NftPurchaseAction{
 			AuctionType: oas.NftPurchaseActionAuctionType(a.NftPurchase.AuctionType),
-			Amount:      oas.Price{Value: fmt.Sprintf("%d", price), TokenName: "TON"},
+			Amount:      price,
 			Nft:         nft,
 			Seller:      convertAccountAddress(a.NftPurchase.Seller, h.addressBook),
 			Buyer:       convertAccountAddress(a.NftPurchase.Buyer, h.addressBook),
 		})
 	case bath.ElectionsDepositStake:
-		value := i18n.FormatTONs(a.ElectionsDepositStake.Amount)
+		value := i18n.FormatGrams(a.ElectionsDepositStake.Amount)
 		action.ElectionsDepositStake.SetTo(oas.ElectionsDepositStakeAction{
 			Amount: a.ElectionsDepositStake.Amount,
 			Staker: convertAccountAddress(a.ElectionsDepositStake.Staker, h.addressBook),
@@ -625,7 +1011,7 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 			Accounts: distinctAccounts(viewer, h.addressBook, &a.ElectionsDepositStake.Elector, &a.ElectionsDepositStake.Staker),
 		}
 	case bath.ElectionsRecoverStake:
-		value := i18n.FormatTONs(a.ElectionsRecoverStake.Amount)
+		value := i18n.FormatGrams(a.ElectionsRecoverStake.Amount)
 		action.ElectionsRecoverStake.SetTo(oas.ElectionsRecoverStakeAction{
 			Amount: a.ElectionsRecoverStake.Amount,
 			Staker: convertAccountAddress(a.ElectionsRecoverStake.Staker, h.addressBook),
@@ -649,42 +1035,38 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 		swapAction := oas.JettonSwapAction{
 			UserWallet: convertAccountAddress(a.JettonSwap.UserWallet, h.addressBook),
 			Router:     convertAccountAddress(a.JettonSwap.Router, h.addressBook),
+			Dex:        string(a.JettonSwap.Dex),
 		}
 		simplePreviewData := i18n.Template{}
 		if a.JettonSwap.In.IsTon {
 			swapAction.TonIn = oas.NewOptInt64(a.JettonSwap.In.Amount.Int64())
-			simplePreviewData["JettonIn"] = ""
-			simplePreviewData["AmountIn"] = i18n.FormatTONs(a.JettonSwap.In.Amount.Int64())
+			simplePreviewData["AmountIn"] = i18n.FormatGrams(a.JettonSwap.In.Amount.Int64())
 		} else {
+			scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, a.JettonSwap.In.JettonMaster, &eventLt)
+			if err != nil {
+				return oas.Action{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+			}
 			swapAction.AmountIn = a.JettonSwap.In.Amount.String()
 			jettonInMeta := h.GetJettonNormalizedMetadata(ctx, a.JettonSwap.In.JettonMaster)
 			score, _ := h.score.GetJettonScore(a.JettonSwap.In.JettonMaster)
-			preview := jettonPreview(a.JettonSwap.In.JettonMaster, jettonInMeta, score)
+			preview := jettonPreview(a.JettonSwap.In.JettonMaster, jettonInMeta, score, scaledUiParams)
 			swapAction.JettonMasterIn.SetTo(preview)
-			simplePreviewData["JettonIn"] = preview.GetSymbol()
-			simplePreviewData["AmountIn"] = ScaleJettons(a.JettonSwap.In.Amount, jettonInMeta.Decimals).String()
+			simplePreviewData["AmountIn"] = i18n.FormatTokens(a.JettonSwap.In.Amount, int32(jettonInMeta.Decimals), jettonInMeta.Symbol, scaledUiParams)
 		}
 		if a.JettonSwap.Out.IsTon {
 			swapAction.TonOut = oas.NewOptInt64(a.JettonSwap.Out.Amount.Int64())
-			simplePreviewData["JettonOut"] = ""
-			simplePreviewData["AmountOut"] = i18n.FormatTONs(a.JettonSwap.Out.Amount.Int64())
+			simplePreviewData["AmountOut"] = i18n.FormatGrams(a.JettonSwap.Out.Amount.Int64())
 		} else {
+			scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, a.JettonSwap.Out.JettonMaster, &eventLt)
+			if err != nil {
+				return oas.Action{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+			}
 			swapAction.AmountOut = a.JettonSwap.Out.Amount.String()
 			jettonOutMeta := h.GetJettonNormalizedMetadata(ctx, a.JettonSwap.Out.JettonMaster)
 			score, _ := h.score.GetJettonScore(a.JettonSwap.Out.JettonMaster)
-			preview := jettonPreview(a.JettonSwap.Out.JettonMaster, jettonOutMeta, score)
+			preview := jettonPreview(a.JettonSwap.Out.JettonMaster, jettonOutMeta, score, scaledUiParams)
 			swapAction.JettonMasterOut.SetTo(preview)
-			simplePreviewData["JettonOut"] = preview.GetSymbol()
-			simplePreviewData["AmountOut"] = ScaleJettons(a.JettonSwap.Out.Amount, jettonOutMeta.Decimals).String()
-		}
-
-		switch a.JettonSwap.Dex {
-		case bath.Stonfi:
-			swapAction.Dex = oas.JettonSwapActionDexStonfi
-		case bath.Megatonfi:
-			swapAction.Dex = oas.JettonSwapActionDexMegatonfi
-		case bath.Dedust:
-			swapAction.Dex = oas.JettonSwapActionDexDedust
+			simplePreviewData["AmountOut"] = i18n.FormatTokens(a.JettonSwap.Out.Amount, int32(jettonOutMeta.Decimals), jettonOutMeta.Symbol, scaledUiParams)
 		}
 
 		action.JettonSwap.SetTo(swapAction)
@@ -694,7 +1076,7 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 			Description: i18n.T(acceptLanguage.Value, i18n.C{
 				DefaultMessage: &i18n.M{
 					ID:    "jettonSwapAction",
-					Other: "Swapping {{.AmountIn}} {{.JettonIn}} for {{.AmountOut}} {{.JettonOut}}",
+					Other: "Swapping {{.AmountIn}} for {{.AmountOut}}",
 				},
 				TemplateData: simplePreviewData,
 			}),
@@ -702,6 +1084,12 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 		}
 	case bath.AuctionBid:
 		var nft oas.OptNftItem
+		price := h.convertPrice(ctx, a.AuctionBid.Amount)
+		scaledUiParams, err := h.scaledUIParamsFromPrice(ctx, a.AuctionBid.Amount, &eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+		}
+		value := i18n.FormatTokens(a.AuctionBid.Amount.Amount, int32(price.Decimals), price.TokenName, scaledUiParams)
 		if a.AuctionBid.Nft == nil && a.AuctionBid.NftAddress != nil {
 			n, err := h.storage.GetNFTs(ctx, []tongo.AccountID{*a.AuctionBid.NftAddress})
 			if err != nil {
@@ -716,17 +1104,14 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 		}
 		nft.SetTo(h.convertNFT(ctx, *a.AuctionBid.Nft, h.addressBook, h.metaCache, ""))
 		action.AuctionBid.SetTo(oas.AuctionBidAction{
-			Amount: oas.Price{
-				Value:     fmt.Sprintf("%v", a.AuctionBid.Amount),
-				TokenName: "TON",
-			},
+			Amount:  price,
 			Nft:     nft,
 			Bidder:  convertAccountAddress(a.AuctionBid.Bidder, h.addressBook),
 			Auction: convertAccountAddress(a.AuctionBid.Auction, h.addressBook),
 		})
 		if a.AuctionBid.Nft.CollectionAddress != nil && *a.AuctionBid.Nft.CollectionAddress == references.RootTelegram {
 			action.AuctionBid.Value.AuctionType = oas.AuctionBidActionAuctionTypeDNSTg
-		} else if a.AuctionBid.Type != bath.DnsTgAuction {
+		} else {
 			action.AuctionBid.Value.AuctionType = oas.AuctionBidActionAuctionType(a.AuctionBid.Type)
 		}
 		action.SimplePreview = oas.ActionSimplePreview{
@@ -737,7 +1122,7 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 					Other: "Bidding {{.Amount}} for {{.NftName}}",
 				},
 				TemplateData: i18n.Template{
-					"Amount":  i18n.FormatTONs(a.AuctionBid.Amount),
+					"Amount":  oas.NewOptString(value),
 					"NftName": optionalFromMeta(nft.Value.Metadata, "name"),
 				},
 			}),
@@ -752,11 +1137,12 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 			op = "JettonAdminAction"
 		}
 		contractAction := oas.SmartContractAction{
-			Executor:    convertAccountAddress(a.SmartContractExec.Executor, h.addressBook),
-			Contract:    convertAccountAddress(a.SmartContractExec.Contract, h.addressBook),
-			TonAttached: a.SmartContractExec.TonAttached,
-			Operation:   op,
-			Refund:      oas.OptRefund{},
+			Executor:     convertAccountAddress(a.SmartContractExec.Executor, h.addressBook),
+			Contract:     convertAccountAddress(a.SmartContractExec.Contract, h.addressBook),
+			TonAttached:  oas.OptInt64{Set: true, Value: a.SmartContractExec.TonAttached},
+			GramAttached: a.SmartContractExec.TonAttached,
+			Operation:    op,
+			Refund:       oas.OptRefund{},
 		}
 		action.SimplePreview = oas.ActionSimplePreview{
 			Name: "Smart Contract Execution",
@@ -773,14 +1159,52 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 		}
 		action.SmartContractExec.SetTo(contractAction)
 	case bath.DepositStake:
-		action.DepositStake, action.SimplePreview = h.convertDepositStake(a.DepositStake, acceptLanguage.Value, viewer)
+		action.DepositStake, action.SimplePreview, err = h.convertDepositStake(ctx, a.DepositStake, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert deposit stake: %w", err)
+		}
+	case bath.WithdrawTokenStakeRequest:
+		action.WithdrawTokenStakeRequest, action.SimplePreview = h.convertWithdrawTokenStakeRequest(ctx, a.WithdrawTokenStakeRequest, acceptLanguage.Value, viewer)
+	case bath.DepositTokenStake:
+		action.DepositTokenStake, action.SimplePreview, err = h.convertDepositTokenStake(ctx, a.DepositTokenStake, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert deposit token stake: %w", err)
+		}
 	case bath.WithdrawStakeRequest:
-		action.WithdrawStakeRequest, action.SimplePreview = h.convertWithdrawStakeRequest(a.WithdrawStakeRequest, acceptLanguage.Value, viewer)
+		action.WithdrawStakeRequest, action.SimplePreview, err = h.convertWithdrawStakeRequest(ctx, a.WithdrawStakeRequest, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert withdraw stake request: %w", err)
+		}
 	case bath.WithdrawStake:
 		action.WithdrawStake, action.SimplePreview = h.convertWithdrawStake(a.WithdrawStake, acceptLanguage.Value, viewer)
 	case bath.DomainRenew:
 		action.DomainRenew, action.SimplePreview = h.convertDomainRenew(ctx, a.DnsRenew, acceptLanguage.Value, viewer)
-
+	case bath.Purchase:
+		action.Purchase, action.SimplePreview, err = h.convertPurchaseAction(ctx, a.Purchase, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert purchase action: %w", err)
+		}
+	case bath.AddExtension:
+		action.AddExtension, action.SimplePreview = h.convertAddExtensionAction(ctx, a.AddExtension, acceptLanguage.Value, viewer)
+	case bath.RemoveExtension:
+		action.RemoveExtension, action.SimplePreview = h.convertRemoveExtensionAction(ctx, a.RemoveExtension, acceptLanguage.Value, viewer)
+	case bath.SetSignatureAllowed:
+		action.SetSignatureAllowedAction, action.SimplePreview = h.convertSetSignatureAllowed(ctx, a.SetSignatureAllowed, acceptLanguage.Value, viewer)
+	case bath.GasRelay:
+		action.GasRelay, action.SimplePreview = h.convertGasRelayAction(ctx, a.GasRelay, acceptLanguage.Value, viewer, eventLt)
+	case bath.LiquidityDeposit:
+		action.LiquidityDeposit, action.SimplePreview, err = h.convertLiquidityDepositAction(ctx, a.LiquidityDepositAction, acceptLanguage.Value, viewer, eventLt)
+		if err != nil {
+			return oas.Action{}, fmt.Errorf("failed to convert liquidity deposit action: %w", err)
+		}
+	case bath.OracleRequest:
+		action.OracleRequest, action.SimplePreview = h.convertOracleRequestAction(a.OracleRequest, acceptLanguage.Value, viewer)
+	case bath.BuyXTR:
+		action.BuyXTR, action.SimplePreview = h.convertBuyXTRAction(ctx, a.BuyXTR, acceptLanguage.Value, viewer)
+	case bath.DepositXTR:
+		action.DepositXTR, action.SimplePreview = h.convertDepositXTRAction(ctx, a.DepositXTR, acceptLanguage.Value, viewer)
+	case bath.WithdrawXTR:
+		action.WithdrawXTR, action.SimplePreview = h.convertWithdrawXTRAction(ctx, a.WithdrawXTR, acceptLanguage.Value, viewer)
 	}
 	return action, nil
 }
@@ -788,8 +1212,12 @@ func (h *Handler) convertAction(ctx context.Context, viewer *tongo.AccountID, a 
 func convertAccountValueFlow(accountID tongo.AccountID, flow *bath.AccountValueFlow, book addressBook, previews map[tongo.AccountID]oas.JettonPreview) oas.ValueFlow {
 	valueFlow := oas.ValueFlow{
 		Account: convertAccountAddress(accountID, book),
-		Ton:     flow.Ton,
-		Fees:    flow.Fees,
+		Ton: oas.OptInt64{
+			Value: int64(flow.Gram),
+			Set:   true,
+		},
+		Gram: int64(flow.Gram),
+		Fees: flow.Fees,
 	}
 	for jettonMaster, quantity := range flow.Jettons {
 		valueFlow.Jettons = append(valueFlow.Jettons, oas.ValueFlowJettonsItem{
@@ -802,24 +1230,42 @@ func convertAccountValueFlow(accountID tongo.AccountID, flow *bath.AccountValueF
 	return valueFlow
 }
 
+func getExtMsgHash(trace *core.Trace) string {
+	if trace == nil || trace.InMsg == nil {
+		return ""
+	}
+	return trace.InMsg.Hash.Hex()
+}
+
 func (h *Handler) toEvent(ctx context.Context, trace *core.Trace, result *bath.ActionsList, lang oas.OptString) (oas.Event, error) {
+	lt := int64(trace.Lt)
 	event := oas.Event{
 		EventID:    trace.Hash.Hex(),
 		Timestamp:  trace.Utime,
 		Actions:    make([]oas.Action, len(result.Actions)),
 		ValueFlow:  make([]oas.ValueFlow, 0, len(result.ValueFlow.Accounts)),
 		IsScam:     false,
-		Lt:         int64(trace.Lt),
+		Lt:         lt,
 		InProgress: trace.InProgress(),
+		Progress:   trace.CalculateProgress(),
 	}
+
+	if extHash := getExtMsgHash(trace); extHash != "" {
+		event.ExtMsgHash.SetTo(extHash)
+	}
+
+	if !event.InProgress && trace.LastSliceID != nil {
+		event.LastSliceID.SetTo(*trace.LastSliceID)
+	}
+
 	for i, a := range result.Actions {
-		convertedAction, err := h.convertAction(ctx, nil, a, lang)
+		convertedAction, err := h.convertAction(ctx, nil, a, lang, event.Lt)
 		if err != nil {
 			return oas.Event{}, err
 		}
 		event.Actions[i] = convertedAction
 	}
-	event.IsScam = h.spamFilter.IsScamEvent(event.Actions, nil, trace.Account, false)
+	event.IsScam = h.spamFilter.IsScamEvent(event.Actions, nil, trace.Account)
 	previews := make(map[tongo.AccountID]oas.JettonPreview)
 	for _, flow := range result.ValueFlow.Accounts {
 		for jettonMaster := range flow.Jettons {
@@ -828,7 +1274,11 @@ func (h *Handler) toEvent(ctx context.Context, trace *core.Trace, result *bath.A
 			}
 			meta := h.GetJettonNormalizedMetadata(ctx, jettonMaster)
 			score, _ := h.score.GetJettonScore(jettonMaster)
-			previews[jettonMaster] = jettonPreview(jettonMaster, meta, score)
+			scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, jettonMaster, &lt)
+			if err != nil {
+				return oas.Event{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+			}
+			previews[jettonMaster] = jettonPreview(jettonMaster, meta, score, scaledUiParams)
 		}
 	}
 	for accountID, flow := range result.ValueFlow.Accounts {
@@ -864,7 +1314,13 @@ func (h *Handler) toAccountEventForLongTrace(account tongo.AccountID, traceID co
 	}
 	return e
 }
+
 func (h *Handler) toUnknownAccountEvent(account tongo.AccountID, traceID core.TraceID) oas.AccountEvent {
+	unknownEventCounterVec.Inc()
+	slog.Error(
+		"failed to get account event",
+		slog.String("eventID", traceID.Hash.Hex()),
+	)
 	e := oas.AccountEvent{
 		EventID:    traceID.Hash.Hex(),
 		Account:    convertAccountAddress(account, h.addressBook),
@@ -888,19 +1344,23 @@ func (h *Handler) toAccountEvent(ctx context.Context, account tongo.AccountID, t
 		Lt:         int64(trace.Lt),
 		InProgress: trace.InProgress(),
 		Extra:      result.Extra(account),
+		Progress:   trace.CalculateProgress(),
+	}
+	if extHash := getExtMsgHash(trace); extHash != "" {
+		e.ExtMsgHash.SetTo(extHash)
 	}
 	for _, a := range result.Actions {
-		if subjectOnly && !a.IsSubject(account) {
+		if subjectOnly && !a.IsSubject(account) && a.Type != bath.UnSubscribe {
 			continue
 		}
-		convertedAction, err := h.convertAction(ctx, &account, a, lang)
+		convertedAction, err := h.convertAction(ctx, &account, a, lang, e.Lt)
 		if err != nil {
 			return oas.AccountEvent{}, err
 		}
 		e.Actions = append(e.Actions, convertedAction)
 	}
 	if h.spamFilter != nil {
-		e.IsScam = h.spamFilter.IsScamEvent(e.Actions, &account, trace.Account, false)
+		e.IsScam = h.spamFilter.IsScamEvent(e.Actions, &account, trace.Account)
 	}
 	if len(e.Actions) == 0 {
 		e.Actions = []oas.Action{
@@ -916,4 +1376,198 @@ func convertEncryptedComment(comment *bath.EncryptedComment) oas.OptEncryptedCom
 		c.SetTo(oas.EncryptedComment{EncryptionType: comment.EncryptionType, CipherText: hex.EncodeToString(comment.CipherText)})
 	}
 	return c
+}
+
+func (h *Handler) convertAddExtensionAction(ctx context.Context, p *bath.AddExtensionAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptAddExtensionAction, oas.ActionSimplePreview) {
+	addExtensionAction := oas.AddExtensionAction{
+		Wallet:    convertAccountAddress(p.Wallet, h.addressBook),
+		Extension: p.Extension.ToRaw(),
+	}
+	simplePreview := oas.ActionSimplePreview{
+		Name: "AddExtension",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "addExtensionAction",
+				Other: "Add extension to wallet",
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &p.Wallet, &p.Extension),
+	}
+	var action oas.OptAddExtensionAction
+	action.SetTo(addExtensionAction)
+	return action, simplePreview
+}
+
+func (h *Handler) convertRemoveExtensionAction(ctx context.Context, p *bath.RemoveExtensionAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptRemoveExtensionAction, oas.ActionSimplePreview) {
+	removeExtensionAction := oas.RemoveExtensionAction{
+		Wallet:    convertAccountAddress(p.Wallet, h.addressBook),
+		Extension: p.Extension.ToRaw(),
+	}
+	simplePreview := oas.ActionSimplePreview{
+		Name: "RemoveExtension",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "removeExtensionAction",
+				Other: "Remove extension from wallet",
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &p.Wallet, &p.Extension),
+	}
+	var action oas.OptRemoveExtensionAction
+	action.SetTo(removeExtensionAction)
+	return action, simplePreview
+}
+
+func (h *Handler) convertSetSignatureAllowed(ctx context.Context, p *bath.SetSignatureAllowedAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptSetSignatureAllowedAction, oas.ActionSimplePreview) {
+	setSignatureAllowedAction := oas.SetSignatureAllowedAction{
+		Wallet:  convertAccountAddress(p.Wallet, h.addressBook),
+		Allowed: p.SignatureAllowed,
+	}
+	act := "Disable"
+	if p.SignatureAllowed {
+		act = "Enable"
+	}
+	simplePreview := oas.ActionSimplePreview{
+		Name: "SetSignatureAllowed",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "setSignatureAllowedAction",
+				Other: "{{.Action}} wallet signature",
+			},
+			TemplateData: i18n.Template{"Action": act},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &p.Wallet),
+	}
+	var action oas.OptSetSignatureAllowedAction
+	action.SetTo(setSignatureAllowedAction)
+	return action, simplePreview
+}
+
+func (h *Handler) convertSubscribe(ctx context.Context, a *bath.SubscribeAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptSubscriptionAction, oas.ActionSimplePreview, error) {
+	price := h.convertPrice(ctx, a.Price)
+	subscribeAction := oas.SubscriptionAction{
+		Price:        price,
+		Beneficiary:  convertAccountAddress(a.WithdrawTo, h.addressBook),
+		Subscriber:   convertAccountAddress(a.Subscriber, h.addressBook),
+		Admin:        convertAccountAddress(a.Admin, h.addressBook),
+		Subscription: a.Subscription.ToRaw(),
+		Initial:      a.First,
+	}
+	subscribeAction.Amount.SetTo(a.Price.Amount.Int64()) // for backward compatibility
+	scaledUiParams, err := h.scaledUIParamsFromPrice(ctx, a.Price, &eventLt)
+	if err != nil {
+		return oas.OptSubscriptionAction{}, oas.ActionSimplePreview{}, fmt.Errorf("failed to get scaled UI parameters: %w", err)
+	}
+	value := i18n.FormatTokens(a.Price.Amount, int32(price.Decimals), price.TokenName, scaledUiParams)
+
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Subscription Charge",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "subscriptionAction",
+				Other: "Paying {{.Value}} for subscription",
+			},
+			TemplateData: i18n.Template{"Value": value},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &a.Admin, &a.Subscriber, &a.WithdrawTo),
+		Value:    oas.NewOptString(value),
+	}
+	if a.Price.Amount.Cmp(big.NewInt(0)) == 0 {
+		simplePreview.Name = "Subscribed"
+		simplePreview.Description = i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "trialSubscriptionAction",
+				Other: "Subscription initiated with a delayed payment",
+			},
+		})
+	}
+	var action oas.OptSubscriptionAction
+	action.SetTo(subscribeAction)
+	return action, simplePreview, nil
+}
+
+func (h *Handler) convertUnsubscribe(ctx context.Context, a *bath.UnSubscribeAction, acceptLanguage string, viewer *tongo.AccountID) (oas.OptUnSubscriptionAction, oas.ActionSimplePreview) {
+	simplePreview := oas.ActionSimplePreview{
+		Name: "Unsubscribed",
+		Description: i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "unsubscribeAction",
+				Other: "Subscription deactivated",
+			},
+		}),
+		Accounts: distinctAccounts(viewer, h.addressBook, &a.Admin, &a.Subscriber, &a.WithdrawTo),
+	}
+	var action oas.OptUnSubscriptionAction
+	action.SetTo(oas.UnSubscriptionAction{
+		Beneficiary:  convertAccountAddress(a.WithdrawTo, h.addressBook),
+		Subscriber:   convertAccountAddress(a.Subscriber, h.addressBook),
+		Admin:        convertAccountAddress(a.Admin, h.addressBook),
+		Subscription: a.Subscription.ToRaw(),
+	})
+	return action, simplePreview
+}
+
+func (h *Handler) convertGasRelayAction(ctx context.Context, t *bath.GasRelayAction, acceptLanguage string, viewer *tongo.AccountID, eventLt int64) (oas.OptGasRelayAction, oas.ActionSimplePreview) {
+	var action oas.OptGasRelayAction
+	oasAction := oas.GasRelayAction{
+		Amount:    t.Amount,
+		Target:    convertAccountAddress(t.Target, h.addressBook),
+		Relayer:   convertAccountAddress(t.Relayer, h.addressBook),
+		IsBattery: oas.NewOptBool(t.IsBattery),
+	}
+	if t.RelayerFee != nil {
+		scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, t.RelayerFee.JettonMaster, &eventLt)
+		if err != nil {
+			// non-critical, continue without scaled UI params
+			scaledUiParams = nil
+		}
+		meta := h.GetJettonNormalizedMetadata(ctx, t.RelayerFee.JettonMaster)
+		score, _ := h.score.GetJettonScore(t.RelayerFee.JettonMaster)
+		preview := jettonPreview(t.RelayerFee.JettonMaster, meta, score, scaledUiParams)
+		oasAction.RelayerFee.SetTo(oas.GasRelayFee{
+			Jetton: preview,
+			Amount: g.Pointer(big.Int(t.RelayerFee.Amount)).String(),
+		})
+	}
+	action.SetTo(oasAction)
+	var name, description string
+	if t.IsBattery {
+		name = "Tonkeeper battery"
+		description = i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "gasRelayBatteryAction",
+				Other: "Tonkeeper battery",
+			},
+		})
+	} else if t.RelayerFee != nil {
+		name = "Tonkeeper gasless"
+		description = i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "gasRelayGaslessAction",
+				Other: "Tonkeeper gasless",
+			},
+		})
+	} else {
+		name = "Gas Relay"
+		description = i18n.T(acceptLanguage, i18n.C{
+			DefaultMessage: &i18n.M{
+				ID:    "gasRelayAction",
+				Other: "Relay for gas",
+			},
+		})
+	}
+	simplePreview := oas.ActionSimplePreview{
+		Name:        name,
+		Description: description,
+		Accounts:    distinctAccounts(viewer, h.addressBook, &t.Relayer, &t.Target),
+		Value:       oas.NewOptString(i18n.FormatGrams(t.Amount)),
+	}
+	return action, simplePreview
+}
+
+func (h *Handler) scaledUIParamsFromPrice(ctx context.Context, price core.Price, beforeLt *int64) (scaledUiParams *core.ScaledUIParameters, err error) {
+	if price.Currency.Type == core.CurrencyJetton {
+		return h.storage.GetScaledUIParameters(ctx, *price.Currency.Jetton, beforeLt)
+	}
+	return nil, nil
 }

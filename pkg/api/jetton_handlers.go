@@ -4,24 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
 	"net/http"
 	"slices"
 	"strings"
 
 	"github.com/tonkeeper/opentonapi/pkg/bath"
 	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/opentonapi/pkg/defi"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/ton"
+	"go.uber.org/zap"
 )
 
 func (h *Handler) GetAccountJettonsBalances(ctx context.Context, params oas.GetAccountJettonsBalancesParams) (*oas.JettonsBalances, error) {
-	account, err := tongo.ParseAddress(params.AccountID)
+	account, err := parseAccountID(params.AccountID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	wallets, err := h.storage.GetJettonWalletsByOwnerAddress(ctx, account.ID, nil, true, slices.Contains(params.SupportedExtensions, "custom_payload"))
+	wallets, err := h.storage.GetJettonWalletsByOwnerAddress(ctx, account, nil, true, slices.Contains(params.SupportedExtensions, "custom_payload"), params.Limit.Value, params.Offset.Value)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return &oas.JettonsBalances{}, nil
 	}
@@ -31,9 +32,19 @@ func (h *Handler) GetAccountJettonsBalances(ctx context.Context, params oas.GetA
 	var balances = oas.JettonsBalances{
 		Balances: make([]oas.JettonBalance, 0, len(wallets)),
 	}
+	var assetInfos map[tongo.AccountID]defi.AssetInfo
+	if slices.Contains(params.SupportedExtensions, "defi") {
+		masters := make([]tongo.AccountID, 0, len(wallets))
+		for _, wallet := range wallets {
+			masters = append(masters, wallet.JettonAddress)
+		}
+		assetInfos = defi.AssetInfos(ctx, h.storage, h.logger, masters)
+	}
 	for _, wallet := range wallets {
-		jettonBalance, err := h.convertJettonBalance(ctx, wallet, params.Currencies)
+		assetInfo, ok := assetInfos[wallet.JettonAddress]
+		jettonBalance, err := h.convertJettonBalance(ctx, wallet, params.Currencies, nil, h.optJettonAssetInfo(ctx, assetInfo, ok))
 		if err != nil {
+			h.logger.Warn(fmt.Sprintf("Failed to convert jetton balance for wallet %v", wallet.JettonAddress.ToRaw()), zap.Error(err))
 			continue
 		}
 		balances.Balances = append(balances.Balances, jettonBalance)
@@ -42,15 +53,15 @@ func (h *Handler) GetAccountJettonsBalances(ctx context.Context, params oas.GetA
 }
 
 func (h *Handler) GetAccountJettonBalance(ctx context.Context, params oas.GetAccountJettonBalanceParams) (*oas.JettonBalance, error) {
-	account, err := tongo.ParseAddress(params.AccountID)
+	account, err := parseAccountID(params.AccountID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	jettonAccount, err := tongo.ParseAddress(params.JettonID)
+	jettonAccount, err := parseAccountID(params.JettonID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	wallets, err := h.storage.GetJettonWalletsByOwnerAddress(ctx, account.ID, &jettonAccount.ID, true, slices.Contains(params.SupportedExtensions, "custom_payload"))
+	wallets, err := h.storage.GetJettonWalletsByOwnerAddress(ctx, account, &jettonAccount, true, slices.Contains(params.SupportedExtensions, "custom_payload"), 0, 0)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
 	}
@@ -58,9 +69,14 @@ func (h *Handler) GetAccountJettonBalance(ctx context.Context, params oas.GetAcc
 		return nil, toError(http.StatusInternalServerError, err)
 	}
 	if len(wallets) == 0 {
-		return nil, toError(http.StatusNotFound, fmt.Errorf("account %v has no jetton wallet %v", account.ID, jettonAccount.ID))
+		return nil, toError(http.StatusNotFound, fmt.Errorf("account %v has no jetton wallet %v", account, jettonAccount))
 	}
-	jettonBalance, err := h.convertJettonBalance(ctx, wallets[0], params.Currencies)
+	var assetInfos map[tongo.AccountID]defi.AssetInfo
+	if slices.Contains(params.SupportedExtensions, "defi") {
+		assetInfos = defi.AssetInfos(ctx, h.storage, h.logger, []tongo.AccountID{wallets[0].JettonAddress})
+	}
+	assetInfo, ok := assetInfos[wallets[0].JettonAddress]
+	jettonBalance, err := h.convertJettonBalance(ctx, wallets[0], params.Currencies, nil, h.optJettonAssetInfo(ctx, assetInfo, ok))
 	if err != nil {
 		return nil, err
 	}
@@ -68,59 +84,65 @@ func (h *Handler) GetAccountJettonBalance(ctx context.Context, params oas.GetAcc
 }
 
 func (h *Handler) GetJettonInfo(ctx context.Context, params oas.GetJettonInfoParams) (*oas.JettonInfo, error) {
-	account, err := tongo.ParseAddress(params.AccountID)
+	account, err := parseAccountID(params.AccountID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	master, err := h.storage.GetJettonMasterData(ctx, account.ID)
+	master, err := h.storage.GetJettonMasterData(ctx, account)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
 	}
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	holders, err := h.storage.GetJettonsHoldersCount(ctx, []tongo.AccountID{account.ID})
+	holders, err := h.storage.GetJettonsHoldersCount(ctx, []tongo.AccountID{account})
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	converted := h.convertJettonInfo(ctx, master, holders)
+	scaledUiParams, err := h.storage.GetScaledUIParameters(ctx, master.Address, nil)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	converted := h.convertJettonInfo(ctx, master, holders, scaledUiParams)
 	return &converted, nil
 }
 
-func (h *Handler) GetAccountJettonsHistory(ctx context.Context, params oas.GetAccountJettonsHistoryParams) (*oas.AccountEvents, error) {
-	account, err := tongo.ParseAddress(params.AccountID)
+func (h *Handler) GetAccountJettonsHistory(ctx context.Context, params oas.GetAccountJettonsHistoryParams) (*oas.JettonOperations, error) {
+	account, err := parseAccountID(params.AccountID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	traceIDs, err := h.storage.GetAccountJettonsHistory(ctx, account.ID, params.Limit, optIntToPointer(params.BeforeLt), optIntToPointer(params.StartDate), optIntToPointer(params.EndDate))
+	history, err := h.storage.GetAccountJettonsHistory(ctx, account, params.Limit, optIntToPointer(params.BeforeLt), nil, nil)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return &oas.JettonOperations{}, nil
+	}
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	var eventIDs []string
-	for _, traceID := range traceIDs {
-		eventIDs = append(eventIDs, traceID.Hex())
+	var res oas.JettonOperations
+	for _, op := range history {
+		convertedOp, err := h.convertJettonOperation(ctx, op)
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, err)
+		}
+		res.Operations = append(res.Operations, convertedOp)
+		if len(history) == params.Limit {
+			res.NextFrom = oas.NewOptInt64(int64(op.Lt))
+		}
 	}
-	isBannedTraces, err := h.spamFilter.GetEventsScamData(ctx, eventIDs)
-	if err != nil {
-		h.logger.Warn("error getting events spam data", zap.Error(err))
-	}
-	events, lastLT, err := h.convertJettonHistory(ctx, account.ID, nil, traceIDs, isBannedTraces, params.AcceptLanguage)
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	return &oas.AccountEvents{Events: events, NextFrom: lastLT}, nil
+	return &res, nil
 }
 
 func (h *Handler) GetAccountJettonHistoryByID(ctx context.Context, params oas.GetAccountJettonHistoryByIDParams) (*oas.AccountEvents, error) {
-	account, err := tongo.ParseAddress(params.AccountID)
+	account, err := parseAccountID(params.AccountID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	jettonMasterAccount, err := tongo.ParseAddress(params.JettonID)
+	jettonMasterAccount, err := parseAccountID(params.JettonID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	traceIDs, err := h.storage.GetAccountJettonHistoryByID(ctx, account.ID, jettonMasterAccount.ID, params.Limit, optIntToPointer(params.BeforeLt), optIntToPointer(params.StartDate), optIntToPointer(params.EndDate))
+	traceIDs, err := h.storage.GetAccountJettonHistoryByID(ctx, account, jettonMasterAccount, params.Limit, optIntToPointer(params.BeforeLt), optIntToPointer(params.StartDate), optIntToPointer(params.EndDate))
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return &oas.AccountEvents{}, nil
 	}
@@ -131,15 +153,41 @@ func (h *Handler) GetAccountJettonHistoryByID(ctx context.Context, params oas.Ge
 	for _, traceID := range traceIDs {
 		eventIDs = append(eventIDs, traceID.Hex())
 	}
-	isBannedTraces, err := h.spamFilter.GetEventsScamData(ctx, eventIDs)
-	if err != nil {
-		h.logger.Warn("error getting events spam data", zap.Error(err))
-	}
-	events, lastLT, err := h.convertJettonHistory(ctx, account.ID, &jettonMasterAccount.ID, traceIDs, isBannedTraces, params.AcceptLanguage)
+	events, lastLT, err := h.convertJettonHistory(ctx, account, &jettonMasterAccount, traceIDs, params.AcceptLanguage)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
 	return &oas.AccountEvents{Events: events, NextFrom: lastLT}, nil
+}
+
+func (h *Handler) GetJettonAccountHistoryByID(ctx context.Context, params oas.GetJettonAccountHistoryByIDParams) (*oas.JettonOperations, error) {
+	account, err := parseAccountID(params.AccountID)
+	if err != nil {
+		return nil, toError(http.StatusBadRequest, err)
+	}
+	jettonMasterAccount, err := parseAccountID(params.JettonID)
+	if err != nil {
+		return nil, toError(http.StatusBadRequest, err)
+	}
+	history, err := h.storage.GetJettonAccountHistoryByID(ctx, account, jettonMasterAccount, params.Limit, optIntToPointer(params.BeforeLt), optIntToPointer(params.StartDate), optIntToPointer(params.EndDate))
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return &oas.JettonOperations{}, nil
+	}
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+	res := oas.JettonOperations{}
+	for _, op := range history {
+		convertedOp, err := h.convertJettonOperation(ctx, op)
+		if err != nil {
+			return nil, toError(http.StatusInternalServerError, err)
+		}
+		res.Operations = append(res.Operations, convertedOp)
+		if len(history) == params.Limit {
+			res.NextFrom = oas.NewOptInt64(int64(op.Lt))
+		}
+	}
+	return &res, nil
 }
 
 func (h *Handler) GetJettons(ctx context.Context, params oas.GetJettonsParams) (*oas.Jettons, error) {
@@ -150,14 +198,22 @@ func (h *Handler) GetJettons(ctx context.Context, params oas.GetJettonsParams) (
 			limit = 1000
 		}
 	}
-	offset := 0
-	if params.Offset.IsSet() {
-		offset = int(params.Offset.Value)
-		if offset < 0 {
-			offset = 0
+	var jettons []core.JettonMaster
+	var err error
+	switch {
+	case params.LastAccountID.IsSet():
+		var accountID tongo.AccountID
+		accountID, err = parseAccountID(params.LastAccountID.Value)
+		if err != nil {
+			return nil, toError(http.StatusBadRequest, err)
 		}
+		jettons, err = h.storage.GetJettonMasters(ctx, limit, &accountID)
+	case params.Offset.IsSet() && params.Offset.Value > 0:
+		offset := max(int(params.Offset.Value), 0)
+		jettons, err = h.storage.GetJettonMastersByOffset(ctx, limit, offset)
+	default:
+		jettons, err = h.storage.GetJettonMasters(ctx, limit, nil)
 	}
-	jettons, err := h.storage.GetJettonMasters(ctx, limit, offset)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -171,21 +227,50 @@ func (h *Handler) GetJettons(ctx context.Context, params oas.GetJettonsParams) (
 	}
 	results := make([]oas.JettonInfo, len(jettons))
 	for idx, master := range jettons {
-		results[idx] = h.convertJettonInfo(ctx, master, holders)
+		var scaledUiParams *core.ScaledUIParameters
+		if master.Enriched == nil {
+			scaledUiParams, err = h.storage.GetScaledUIParameters(ctx, master.Address, nil)
+			if err != nil {
+				return nil, toError(http.StatusInternalServerError, err)
+			}
+		} else {
+			scaledUiParams = master.Enriched.ScaledUI
+		}
+		results[idx] = h.convertJettonInfo(ctx, master, holders, scaledUiParams)
 	}
 	return &oas.Jettons{Jettons: results}, nil
 }
 
+const maxHoldersOffset = 9000
+
 func (h *Handler) GetJettonHolders(ctx context.Context, params oas.GetJettonHoldersParams) (*oas.JettonHolders, error) {
-	account, err := tongo.ParseAddress(params.AccountID)
+	account, err := parseAccountID(params.AccountID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	holders, err := h.storage.GetJettonHolders(ctx, account.ID, params.Limit.Value, params.Offset.Value)
+	if params.LastAccountID.Set && params.SortBy.Value != oas.GetJettonHoldersSortByAddress {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("last_account_id requires sort_by=address"))
+	}
+	if params.Offset.Value > maxHoldersOffset {
+		return nil, toError(http.StatusBadRequest, fmt.Errorf("offset is limited to %d; use sort_by=address with last_account_id cursor for deeper pagination", maxHoldersOffset))
+	}
+	var holders []core.JettonHolder
+	if params.SortBy.Value == oas.GetJettonHoldersSortByAddress {
+		lastAccountID, parseErr := parseOptionalAccountID(params.LastAccountID.Value)
+		if parseErr != nil {
+			return nil, toError(http.StatusBadRequest, parseErr)
+		}
+		holders, err = h.storage.GetJettonHoldersByAddress(ctx, account, params.Limit.Value, lastAccountID)
+	} else {
+		holders, err = h.storage.GetJettonHoldersByBalance(ctx, account, params.Limit.Value, params.Offset.Value)
+	}
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusNotFound, err)
+	}
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	holderCounts, err := h.storage.GetJettonsHoldersCount(ctx, []tongo.AccountID{account.ID})
+	holderCounts, err := h.storage.GetJettonsHoldersCount(ctx, []tongo.AccountID{account})
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return &oas.JettonHolders{}, nil
 	}
@@ -194,13 +279,17 @@ func (h *Handler) GetJettonHolders(ctx context.Context, params oas.GetJettonHold
 	}
 	results := oas.JettonHolders{
 		Addresses: make([]oas.JettonHoldersAddressesItem, 0, len(holders)),
-		Total:     int64(holderCounts[account.ID]),
+		Total:     int64(holderCounts[account]),
 	}
 	for _, holder := range holders {
+		owner := NoneAccount
+		if holder.Owner != nil {
+			owner = convertAccountAddressPure(*holder.Owner, h.addressBook, holder.OwnerIsWallet)
+		}
 		results.Addresses = append(results.Addresses, oas.JettonHoldersAddressesItem{
 			Address: holder.Address.ToRaw(),
-			Owner:   convertAccountAddress(holder.Owner, h.addressBook),
 			Balance: holder.Balance.String(),
+			Owner:   owner,
 		})
 	}
 	return &results, nil
@@ -221,7 +310,7 @@ func (h *Handler) GetJettonsEvents(ctx context.Context, params oas.GetJettonsEve
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	result, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage), bath.WithStraws(bath.JettonTransfersBurnsMints))
+	result, err := bath.FindActions(ctx, trace, bath.WithInformationSource(h.storage), bath.WithStraws(bath.JettonTransfersBurnsMints), bath.WithAddressBook(h.addressBook))
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
@@ -229,7 +318,7 @@ func (h *Handler) GetJettonsEvents(ctx context.Context, params oas.GetJettonsEve
 		ValueFlow: &bath.ValueFlow{},
 	}
 	for _, item := range result.Actions {
-		if item.Type != bath.JettonTransfer && item.Type != bath.JettonBurn && item.Type != bath.JettonMint {
+		if item.Type != bath.FlawedJettonTransfer && item.Type != bath.JettonTransfer && item.Type != bath.JettonBurn && item.Type != bath.JettonMint {
 			continue
 		}
 		actionsList.Actions = append(actionsList.Actions, item)
@@ -260,6 +349,9 @@ func (h *Handler) GetJettonTransferPayload(ctx context.Context, params oas.GetJe
 		return nil, toError(http.StatusBadRequest, err)
 	}
 	payload, err := h.storage.GetJettonTransferPayload(ctx, accountID, jettonMaster)
+	if errors.Is(err, core.ErrEntityNotFound) {
+		return nil, toError(http.StatusNotFound, err)
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not implemented") {
 			return nil, toError(http.StatusNotImplemented, err)
@@ -287,11 +379,10 @@ func (h *Handler) GetJettonInfosByAddresses(ctx context.Context, request oas.Opt
 	accounts := make([]ton.AccountID, len(request.Value.AccountIds))
 	var err error
 	for i := range request.Value.AccountIds {
-		account, err := tongo.ParseAddress(request.Value.AccountIds[i])
+		accounts[i], err = parseAccountID(request.Value.AccountIds[i])
 		if err != nil {
 			return nil, toError(http.StatusBadRequest, err)
 		}
-		accounts[i] = account.ID
 	}
 	jettons, err := h.storage.GetJettonMastersByAddresses(ctx, accounts)
 	if err != nil {
@@ -307,7 +398,16 @@ func (h *Handler) GetJettonInfosByAddresses(ctx context.Context, request oas.Opt
 	}
 	results := make([]oas.JettonInfo, len(jettons))
 	for idx, master := range jettons {
-		results[idx] = h.convertJettonInfo(ctx, master, jettonsHolders)
+		var scaledUiParams *core.ScaledUIParameters
+		if master.Enriched == nil {
+			scaledUiParams, err = h.storage.GetScaledUIParameters(ctx, master.Address, nil)
+			if err != nil {
+				return nil, toError(http.StatusInternalServerError, err)
+			}
+		} else {
+			scaledUiParams = master.Enriched.ScaledUI
+		}
+		results[idx] = h.convertJettonInfo(ctx, master, jettonsHolders, scaledUiParams)
 	}
 
 	return &oas.Jettons{Jettons: results}, nil

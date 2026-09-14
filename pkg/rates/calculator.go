@@ -3,6 +3,7 @@ package rates
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -11,6 +12,13 @@ type ratesSource interface {
 	GetRates(date int64) (map[string]float64, error)
 	GetRatesChart(token string, currency string, pointsCount int, startDate *int64, endDate *int64) ([]Point, error)
 	GetMarketsTonPrice() ([]Market, error)
+}
+
+// timestampedRatesSource is implemented by sources backed by the rates service's
+// /v1/rates/timestamped endpoint. Only its prices are consumed; the per-token
+// timestamps it reports are ignored.
+type timestampedRatesSource interface {
+	GetRatesWithTimestamps(date int64) (map[string]float64, map[string]int64, error)
 }
 
 type calculator struct {
@@ -43,8 +51,10 @@ func InitCalculator(source ratesSource) *calculator {
 
 	go func() {
 		for {
+			now := time.Now()
+			nextMinute := now.Truncate(time.Minute).Add(time.Minute + 3*time.Second)
+			time.Sleep(time.Until(nextMinute))
 			c.refresh()
-			time.Sleep(time.Minute * 5)
 		}
 	}()
 
@@ -57,24 +67,32 @@ func (c *calculator) refresh() {
 	weekAgo := today.AddDate(0, 0, -7).Unix()
 	monthAgo := today.AddDate(0, 0, -30).Unix()
 
-	marketsTonPrice, err := c.source.GetMarketsTonPrice()
-	if err != nil {
-		return
+	marketsTonPrice, marketErr := c.source.GetMarketsTonPrice()
+	var todayRates map[string]float64
+	var err error
+	if tsSource, ok := c.source.(timestampedRatesSource); ok {
+		// prices come from the timestamped endpoint; the timestamps are ignored
+		todayRates, _, err = tsSource.GetRatesWithTimestamps(today.Unix())
+	} else {
+		todayRates, err = c.source.GetRates(today.Unix())
 	}
-	todayRates, err := c.source.GetRates(today.Unix())
 	if err != nil {
+		slog.Error("[refresh-rates] error getting today rates", slog.String("err", err.Error()))
 		return
 	}
 	yesterdayRates, err := c.source.GetRates(yesterday)
 	if err != nil {
+		slog.Error("[refresh-rates] error getting yesterday rates", slog.String("err", err.Error()))
 		return
 	}
 	weekRates, err := c.source.GetRates(weekAgo)
 	if err != nil {
+		slog.Error("[refresh-rates] error getting week rates", slog.String("err", err.Error()))
 		return
 	}
 	monthRates, err := c.source.GetRates(monthAgo)
 	if err != nil {
+		slog.Error("[refresh-rates] error getting month rates", slog.String("err", err.Error()))
 		return
 	}
 
@@ -83,7 +101,9 @@ func (c *calculator) refresh() {
 	c.yesterdayRates = yesterdayRates
 	c.weekRates = weekRates
 	c.monthRates = monthRates
-	c.marketsTonPrice = marketsTonPrice
+	if marketErr != nil {
+		c.marketsTonPrice = marketsTonPrice
+	}
 	c.mu.Unlock()
 }
 
@@ -124,7 +144,7 @@ type Mock struct {
 	// TonApiToken the token for TonApi to increase HTTP limits is obtained from https://tonconsole.com/tonapi
 	TonApiToken string
 	// URL to the CSV file from the analytics service https://tonconsole.com/analytics (data is sourced from the TonApi analytics database)
-	StonV1FiResultUrl, StonV2FiResultUrl string
+	StonFiV1ResultUrl, StonFiV2ResultUrl, StonFiV2StableSwapResultUrl, SwapCoffeeResultUrl, BidaskResultUrl string
 	// URL to the CSV file from the analytics service https://tonconsole.com/analytics (data is sourced from the TonApi analytics database)
 	DedustResultUrl string
 }
@@ -136,7 +156,7 @@ func (m Mock) GetRates(date int64) (map[string]float64, error) {
 }
 
 func (m Mock) GetMarketsTonPrice() ([]Market, error) {
-	return m.GetCurrentMarketsTonPrice()
+	return m.GetCurrentMarketsGramPrice()
 }
 
 // GetRatesChart cannot be used to request charts for jettons in the open source version

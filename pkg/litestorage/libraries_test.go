@@ -2,19 +2,25 @@ package litestorage
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/liteapi"
 	"go.uber.org/zap"
 )
 
 func TestLiteStorage_GetLibraries(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 	require.Nil(t, err)
 
-	storage, err := NewLiteStorage(zap.L(), cli)
+	storage, err := NewLiteStorage(zap.L(), core.LiteAPIClient(cli))
 	require.Nil(t, err)
 
 	libs := []tongo.Bits256{

@@ -1,6 +1,9 @@
 package bath
 
 import (
+	"math/big"
+
+	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
 )
@@ -21,7 +24,10 @@ func (b BubbleNftPurchase) ToAction() *Action {
 			Buyer:       b.Buyer,
 			Seller:      b.Seller,
 			AuctionType: b.AuctionType,
-			Price:       b.Price,
+			Price: core.Price{
+				Currency: core.Currency{Type: core.CurrencyNative},
+				Amount:   *big.NewInt(b.Price),
+			},
 		},
 		Success: b.Success,
 		Type:    NftPurchase,
@@ -31,11 +37,14 @@ func (b BubbleNftPurchase) ToAction() *Action {
 var NftPurchaseStraw = Straw[BubbleNftPurchase]{
 	CheckFuncs: []bubbleCheck{
 		IsTx,
-		Or(HasInterface(abi.NftSaleV2), HasInterface(abi.NftSaleV1)),
-		HasEmptyBody,             //all buy transactions has empty body
+		HasInterface(abi.NftSale),
 		AmountInterval(1, 1<<62), //externals has zero value
 		func(bubble *Bubble) bool {
 			tx := bubble.Info.(BubbleTx)
+			if (tx.opCode != nil && *tx.opCode != 0) ||
+				(tx.decodedBody != nil && (tx.decodedBody.Operation != abi.TextCommentMsgOp || tx.decodedBody.Value.(abi.TextCommentMsgBody).Text == "cancel")) {
+				return false
+			}
 			return tx.additionalInfo != nil && tx.additionalInfo.NftSaleContract != nil && tx.additionalInfo.NftSaleContract.Owner != nil
 		}},
 	Builder: func(newAction *BubbleNftPurchase, bubble *Bubble) error {

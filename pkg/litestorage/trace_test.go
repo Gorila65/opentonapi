@@ -2,20 +2,26 @@ package litestorage
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/puzpuzpuz/xsync/v2"
 	"github.com/stretchr/testify/require"
+	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/liteapi"
 )
 
 func TestLiteStorage_getAccountInterfaces(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 	require.Nil(t, err)
 	storage := LiteStorage{
-		client:                 cli,
+		client:                 core.LiteAPIClient(cli),
 		executor:               cli,
 		accountInterfacesCache: xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
 	}

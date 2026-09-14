@@ -1,31 +1,33 @@
 package bath
 
 import (
-	"github.com/tonkeeper/tongo/tlb"
-	"github.com/tonkeeper/tongo/ton"
+	"fmt"
 	"math/big"
 
+	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/opentonapi/pkg/references"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
-)
-
-type Dex string
-
-const (
-	Stonfi    Dex = "stonfi"
-	Megatonfi Dex = "megatonfi"
-	Dedust    Dex = "dedust"
+	"github.com/tonkeeper/tongo/tlb"
+	"github.com/tonkeeper/tongo/ton"
 )
 
 // BubbleJettonSwap contains information about a jetton swap operation at a dex.
 type BubbleJettonSwap struct {
-	Dex        Dex
+	Dex        references.Dex
 	UserWallet tongo.AccountID
 	Router     tongo.AccountID
 	Out        assetTransfer
 	In         assetTransfer
 	Success    bool
 }
+
+// https://docs.ston.fi/developer-section/dex/smart-contracts/v2/op-codes#transfer-exit-codes
+const (
+	// StonfiExitCode_SwapRefundSlippage Swap out token amount is less than the provided minimum value
+	StonfiExitCode_SwapRefundSlippage uint32 = 0x39603190
+	StonfiExitCode_SwapOk             uint32 = 0xc64370e5
+)
 
 func (b BubbleJettonSwap) ToAction() *Action {
 	return &Action{
@@ -67,7 +69,7 @@ var StonfiSwapStraw = Straw[BubbleJettonSwap]{
 		return true
 	}},
 	Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-		newAction.Dex = Stonfi
+		newAction.Dex = references.Stonfi
 		jettonTx := bubble.Info.(BubbleJettonTransfer)
 		newAction.UserWallet = jettonTx.sender.Address
 		newAction.In.Amount = big.Int(jettonTx.amount)
@@ -79,6 +81,9 @@ var StonfiSwapStraw = Straw[BubbleJettonSwap]{
 		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiSwapMsgOp), HasInterface(abi.StonfiPool)},
 		Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
 			tx := bubble.Info.(BubbleTx)
+			if tx.additionalInfo == nil || tx.additionalInfo.STONfiPool == nil {
+				return fmt.Errorf("stonfi pool additional info is not available for %v", tx.account.Address)
+			}
 			a, b := tx.additionalInfo.STONfiPool.Token0, tx.additionalInfo.STONfiPool.Token1
 			body := tx.decodedBody.Value.(abi.StonfiSwapMsgBody)
 			newAction.Out.Amount = big.Int(body.MinOut)
@@ -105,7 +110,7 @@ var StonfiSwapStraw = Straw[BubbleJettonSwap]{
 				return nil
 			},
 			SingleChild: &Straw[BubbleJettonSwap]{
-				CheckFuncs: []bubbleCheck{Is(BubbleJettonTransfer{}), Or(JettonTransferOpCode(0xc64370e5), JettonTransferOpCode(0x5ffe1295))}, //todo: rewrite after jetton operation decoding and found what doest these codes mean
+				CheckFuncs: []bubbleCheck{Is(BubbleJettonTransfer{}), Or(JettonTransferOperation(abi.StonfiSwapOkJettonOp), JettonTransferOpCode(0x5ffe1295))}, //todo: rewrite after jetton operation decoding and found what doest these codes mean
 				Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
 					jettonTx := bubble.Info.(BubbleJettonTransfer)
 					if jettonTx.senderWallet != newAction.Out.JettonWallet {
@@ -124,7 +129,15 @@ var StonfiSwapStraw = Straw[BubbleJettonSwap]{
 }
 
 var StonfiV1PTONStraw = Straw[BubbleJettonTransfer]{
-	CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.JettonWallet), HasOperation(abi.JettonTransferMsgOp)},
+	CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.JettonWallet), HasOperation(abi.JettonTransferMsgOp), func(bubble *Bubble) bool {
+		tx := bubble.Info.(BubbleTx)
+		body := tx.decodedBody.Value.(abi.JettonTransferMsgBody)
+		amount := big.Int(body.Amount)
+		if big.NewInt(tx.inputAmount).Cmp(&amount) < 1 {
+			return false
+		}
+		return true
+	}},
 	Builder: func(newAction *BubbleJettonTransfer, bubble *Bubble) error {
 		tx := bubble.Info.(BubbleTx)
 		newAction.master, _ = tx.additionalInfo.JettonMaster(tx.account.Address)
@@ -155,7 +168,14 @@ var StonfiV1PTONStraw = Straw[BubbleJettonTransfer]{
 }
 
 var StonfiV2PTONStraw = Straw[BubbleJettonTransfer]{
-	CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.JettonWallet), HasOperation(abi.PtonTonTransferMsgOp)},
+	CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.JettonWallet), HasOperation(abi.PtonTonTransferMsgOp), func(bubble *Bubble) bool {
+		tx := bubble.Info.(BubbleTx)
+		body := tx.decodedBody.Value.(abi.PtonTonTransferMsgBody)
+		if uint64(tx.inputAmount) <= uint64(body.TonAmount) {
+			return false
+		}
+		return true
+	}},
 	Builder: func(newAction *BubbleJettonTransfer, bubble *Bubble) error {
 		tx := bubble.Info.(BubbleTx)
 		newAction.master, _ = tx.additionalInfo.JettonMaster(tx.account.Address)
@@ -201,116 +221,210 @@ var StonfiV2PTONStrawReverse = Straw[BubbleJettonTransfer]{
 		}
 		return nil
 	},
-	SingleChild: &Straw[BubbleJettonTransfer]{
-		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.PtonTonTransferMsgOp)},
-		Builder: func(newAction *BubbleJettonTransfer, bubble *Bubble) error {
-			tx := bubble.Info.(BubbleTx)
-			newAction.success = true
-			newAction.recipient = &tx.account
-			return nil
+	Children: []Straw[BubbleJettonTransfer]{
+		{
+			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.PtonTonTransferMsgOp), func(bubble *Bubble) bool {
+				tx := bubble.Info.(BubbleTx)
+				body := tx.decodedBody.Value.(abi.PtonTonTransferMsgBody)
+				if uint64(tx.inputAmount) < uint64(body.TonAmount) {
+					return false
+				}
+				return true
+			}},
+			Builder: func(newAction *BubbleJettonTransfer, bubble *Bubble) error {
+				tx := bubble.Info.(BubbleTx)
+				newAction.success = true
+				newAction.recipient = &tx.account
+				return nil
+			},
+			SingleChild: &Straw[BubbleJettonTransfer]{
+				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.JettonNotifyMsgOp)},
+				Builder: func(newAction *BubbleJettonTransfer, bubble *Bubble) error {
+					tx := bubble.Info.(BubbleTx)
+					newAction.success = true
+					body := tx.decodedBody.Value.(abi.JettonNotifyMsgBody)
+					newAction.amount = body.Amount
+					newAction.payload = body.ForwardPayload.Value
+					newAction.recipient = &tx.account
+					return nil
+				},
+				Optional: true,
+			},
+		},
+		{
+			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+			Optional:   true,
 		},
 	},
 }
 
-var StonfiSwapV2Straw = Straw[BubbleJettonSwap]{
-	CheckFuncs: []bubbleCheck{func(bubble *Bubble) bool {
-		jettonTx, ok := bubble.Info.(BubbleJettonTransfer)
+var StonfiLiquidityDepositSingle = Straw[BubbleLiquidityDeposit]{
+	CheckFuncs: []bubbleCheck{IsJettonTransfer, func(bubble *Bubble) bool {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		body, ok := tx.payload.Value.(abi.StonfiProvideLpV2JettonPayload)
 		if !ok {
 			return false
 		}
-		if jettonTx.sender == nil {
+		if body.CrossProvideLpBody.ToAddress != tx.sender.Address.ToMsgAddress() { // todo support liquidity deposit with farming
 			return false
 		}
-		if jettonTx.payload.SumType != abi.StonfiSwapV2JettonOp {
-			return false
-		}
-		swap, ok := jettonTx.payload.Value.(abi.StonfiSwapV2JettonPayload)
+		_, ok = references.StonfiWhitelistVaults[tx.recipient.Address]
 		if !ok {
-			return false
-		}
-		to, err := ton.AccountIDFromTlb(swap.CrossSwapBody.Receiver)
-		if err != nil || to == nil {
-			return false
-		}
-		if jettonTx.sender.Address != *to { //protection against invalid swaps
 			return false
 		}
 		return true
 	}},
-	Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-		newAction.Dex = Stonfi
+	Builder: func(newAction *BubbleLiquidityDeposit, bubble *Bubble) error {
 		jettonTx := bubble.Info.(BubbleJettonTransfer)
-		newAction.UserWallet = jettonTx.sender.Address
-		newAction.In.Amount = big.Int(jettonTx.amount)
-		newAction.In.IsTon = jettonTx.isWrappedTon
-		newAction.In.JettonMaster = jettonTx.master
+		newAction.Protocol = core.Protocol{
+			Name:  string(references.Stonfi),
+			Image: &references.StonfiImage,
+		}
+		newAction.From = jettonTx.sender.Address
+		if jettonTx.isWrappedTon {
+			newAction.Tokens = append(newAction.Tokens, core.VaultDepositInfo{
+				Price: core.Price{
+					Currency: core.Currency{
+						Type: core.CurrencyNative,
+					},
+					Amount: big.Int(jettonTx.amount),
+				},
+				Vault: jettonTx.recipient.Address,
+			})
+		} else {
+			newAction.Tokens = append(newAction.Tokens, core.VaultDepositInfo{
+				Price: core.Price{
+					Currency: core.Currency{
+						Type:   core.CurrencyJetton,
+						Jetton: &jettonTx.master,
+					},
+					Amount: big.Int(jettonTx.amount),
+				},
+				Vault: jettonTx.recipientWallet,
+			})
+		}
 		return nil
 	},
-	SingleChild: &Straw[BubbleJettonSwap]{
-		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiSwapV2MsgOp), HasInterface(abi.StonfiPoolV2), func(bubble *Bubble) bool {
-			tx, ok := bubble.Info.(BubbleTx)
-			if !ok {
-				return false
-			}
-			if tx.additionalInfo.STONfiPool == nil {
-				return false
-			}
-			return true
-		}},
-		Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-			tx := bubble.Info.(BubbleTx)
-			a, b := tx.additionalInfo.STONfiPool.Token0, tx.additionalInfo.STONfiPool.Token1
-			body := tx.decodedBody.Value.(abi.StonfiSwapV2MsgBody)
-			if body.QueryId > 0 && a.IsZero() && b.IsZero() {
-				return nil
-			}
-			s, err := tongo.AccountIDFromTlb(body.DexPayload.TokenWallet1)
-			if err != nil {
-				return err
-			}
-			if s != nil && *s == a {
-				a, b = b, a
-			}
-			newAction.In.JettonWallet = a
-			newAction.Out.JettonWallet = b
-			if tx.additionalInfo != nil {
-				newAction.In.JettonMaster, _ = tx.additionalInfo.JettonMaster(a)
-				newAction.Out.JettonMaster, _ = tx.additionalInfo.JettonMaster(b)
-			}
-			return nil
-		},
-		Children: []Straw[BubbleJettonSwap]{
-			{
-				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiPayToV2MsgOp)},
-				Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-					tx := bubble.Info.(BubbleTx)
-					newAction.Router = tx.account.Address
-					return nil
-				},
-				SingleChild: &Straw[BubbleJettonSwap]{
-					CheckFuncs: []bubbleCheck{Is(BubbleJettonTransfer{})},
-					Builder: func(newAction *BubbleJettonSwap, bubble *Bubble) error {
-						jettonTx := bubble.Info.(BubbleJettonTransfer)
-						if jettonTx.senderWallet != newAction.Out.JettonWallet {
-							// operation has failed,
-							// stonfi's sent jettons back to the user
-							return nil
-						}
-						newAction.Out.Amount = big.Int(jettonTx.amount)
-						newAction.Out.IsTon = jettonTx.isWrappedTon
-						newAction.Success = true
-						return nil
+	SingleChild: &Straw[BubbleLiquidityDeposit]{
+		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiProvideLpV2MsgOp), HasInterface(abi.StonfiPoolV2)},
+		SingleChild: &Straw[BubbleLiquidityDeposit]{
+			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiAddLiquidityV2MsgOp)},
+			Children: []Straw[BubbleLiquidityDeposit]{
+				{
+					CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiCbAddLiquidityV2MsgOp), HasInterface(abi.StonfiPoolV2)},
+					Children: []Straw[BubbleLiquidityDeposit]{
+						{
+							Optional:   true,
+							CheckFuncs: []bubbleCheck{Is(BubbleJettonMint{})},
+							SingleChild: &Straw[BubbleLiquidityDeposit]{
+								CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.NftItem)},
+								Children: []Straw[BubbleLiquidityDeposit]{
+									{
+										CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+										Builder: func(newAction *BubbleLiquidityDeposit, bubble *Bubble) error {
+											tx := bubble.Info.(BubbleTx)
+											newAction.Success = tx.success
+											return nil
+										},
+									},
+									{
+										Optional:   true,
+										CheckFuncs: []bubbleCheck{Is(BubbleContractDeploy{})},
+									},
+								},
+							},
+						},
+						{
+							Optional:   true,
+							CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.JettonInternalTransferMsgOp)},
+							SingleChild: &Straw[BubbleLiquidityDeposit]{
+								CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+								Builder: func(newAction *BubbleLiquidityDeposit, bubble *Bubble) error {
+									tx := bubble.Info.(BubbleTx)
+									newAction.Success = tx.success
+									return nil
+								},
+							},
+						},
 					},
 				},
+				{
+					Optional:   true,
+					CheckFuncs: []bubbleCheck{Is(BubbleContractDeploy{})},
+				},
 			},
-			{
-				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiPayVaultV2MsgOp)},
-				Optional:   true,
-				SingleChild: &Straw[BubbleJettonSwap]{
-					CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiDepositRefFeeV2MsgOp)},
-					SingleChild: &Straw[BubbleJettonSwap]{
-						CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
-						Optional:   true,
+		},
+	},
+}
+
+var StonfiLiquidityDepositBoth = Straw[BubbleLiquidityDeposit]{
+	CheckFuncs: []bubbleCheck{},
+	Children: []Straw[BubbleLiquidityDeposit]{
+		{
+			CheckFuncs: []bubbleCheck{func(bubble *Bubble) bool {
+				tx, ok := bubble.Info.(BubbleLiquidityDeposit)
+				if !ok {
+					return false
+				}
+				if tx.Protocol.Name != string(references.Stonfi) {
+					return false
+				}
+				return true
+			}},
+			Builder: func(newAction *BubbleLiquidityDeposit, bubble *Bubble) error {
+				tx := bubble.Info.(BubbleLiquidityDeposit)
+				newAction.Protocol = tx.Protocol
+				newAction.From = tx.From
+				newAction.Tokens = append(newAction.Tokens, tx.Tokens...)
+				return nil
+			},
+			Children: []Straw[BubbleLiquidityDeposit]{},
+		},
+		{
+			CheckFuncs: []bubbleCheck{IsJettonTransfer},
+			Builder: func(newAction *BubbleLiquidityDeposit, bubble *Bubble) error {
+				jettonTx := bubble.Info.(BubbleJettonTransfer)
+				if jettonTx.isWrappedTon {
+					newAction.Tokens = append(newAction.Tokens, core.VaultDepositInfo{
+						Price: core.Price{
+							Currency: core.Currency{
+								Type: core.CurrencyNative,
+							},
+							Amount: big.Int(jettonTx.amount),
+						},
+						Vault: jettonTx.recipient.Address,
+					})
+				} else {
+					newAction.Tokens = append(newAction.Tokens, core.VaultDepositInfo{
+						Price: core.Price{
+							Currency: core.Currency{
+								Type:   core.CurrencyJetton,
+								Jetton: &jettonTx.master,
+							},
+							Amount: big.Int(jettonTx.amount),
+						},
+						Vault: jettonTx.recipientWallet,
+					})
+				}
+				return nil
+			},
+			SingleChild: &Straw[BubbleLiquidityDeposit]{
+				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiProvideLpV2MsgOp), HasInterface(abi.StonfiPoolV2)},
+				SingleChild: &Straw[BubbleLiquidityDeposit]{
+					CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.StonfiAddLiquidityV2MsgOp)},
+					Children: []Straw[BubbleLiquidityDeposit]{
+						{
+							CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+							Builder: func(newAction *BubbleLiquidityDeposit, bubble *Bubble) error {
+								tx := bubble.Info.(BubbleTx)
+								newAction.Success = tx.success
+								return nil
+							},
+						},
+						{
+							Optional:   true,
+							CheckFuncs: []bubbleCheck{Is(BubbleContractDeploy{})},
+						},
 					},
 				},
 			},
@@ -318,6 +432,302 @@ var StonfiSwapV2Straw = Straw[BubbleJettonSwap]{
 	},
 }
 
-// https://dev.tonviewer.com/transaction/e19381edd8f05922eeba3c31f4b8b4b737478b4ca7b37130bdbbfd7bfa773227
-// todo: add liquidity (mint lp tokens)
-var StonfiMintStraw = Straw[BubbleJettonMint]{}
+func (s UniversalStonfiStraw) Merge(b *Bubble) bool {
+	swapHops := s.processMultipleRouterSwaps(b)
+	if len(swapHops) == 0 {
+		return false
+	}
+
+	firstHop := swapHops[len(swapHops)-1]
+	finalHop := swapHops[0]
+	finalTransfer, ok := finalHop.srSwaps[0].transfer.Info.(BubbleJettonTransfer)
+	// проверяем что не подменен адрес получателя свапа
+	if !ok || finalTransfer.recipient == nil || finalTransfer.recipient.Address != firstHop.sender {
+		return false
+	}
+
+	swapInfo := BubbleJettonSwap{
+		Dex:        references.Stonfi,
+		UserWallet: firstHop.sender,
+		In:         firstHop.in,
+		Router:     firstHop.router,
+		Out:        firstHop.out,
+		Success:    firstHop.success,
+	}
+
+	// collect all consumed bubbles across all hops for child rescue later
+	allUsedBubbles := map[*Bubble]struct{}{}
+	for _, hop := range swapHops {
+		for k := range hop.usedBubbles {
+			allUsedBubbles[k] = struct{}{}
+		}
+	}
+
+	b.Children = []*Bubble{}
+	mergeValueFlowAndTXs(b, firstHop.usedBubbles)
+
+	// successUsedBubbles tracks consumed bubbles from successful hops only;
+	// their orphaned children will be rescued into b.Children after the loop
+	successUsedBubbles := map[*Bubble]struct{}{}
+	for k := range firstHop.usedBubbles {
+		if k != b {
+			successUsedBubbles[k] = struct{}{}
+		}
+	}
+
+	hasFailed := !swapInfo.Success
+	for i := len(swapHops) - 2; i >= 0; i-- {
+		nextHop := swapHops[i]
+		if !hasFailed && nextHop.success {
+			// merge consequent swaps
+			swapInfo.Router = nextHop.router
+			swapInfo.Out = nextHop.out
+			swapInfo.Success = true
+			mergeValueFlowAndTXs(b, nextHop.usedBubbles)
+			for k := range nextHop.usedBubbles {
+				successUsedBubbles[k] = struct{}{}
+			}
+		} else {
+			hasFailed = true
+			failedSwapB := &Bubble{
+				Info: BubbleJettonSwap{
+					Dex:        references.Stonfi,
+					UserWallet: firstHop.sender,
+					In:         nextHop.in,
+					Router:     nextHop.router,
+					Out:        nextHop.out,
+					Success:    false,
+				},
+				ValueFlow: newValueFlow(),
+			}
+			mergeValueFlowAndTXs(failedSwapB, nextHop.usedBubbles)
+			failedSwapB.Children = rescueOrphanedChildren(nextHop.usedBubbles, allUsedBubbles)
+			b.Children = append(b.Children, failedSwapB)
+		}
+	}
+
+	if hasFailed && len(swapHops) > 1 {
+		// swap failed at a later hop, so the output jetton ends up back at the user.
+		swapInfo.Out.JettonWallet = firstHop.sender
+	}
+	b.Children = append(b.Children, rescueOrphanedChildren(successUsedBubbles, allUsedBubbles)...)
+	b.Info = swapInfo
+	return true
+}
+
+func rescueOrphanedChildren(usedBubbles, allUsedBubbles map[*Bubble]struct{}) []*Bubble {
+	var result []*Bubble
+	for k := range usedBubbles {
+		for _, child := range k.Children {
+			if _, found := allUsedBubbles[child]; !found {
+				result = append(result, child)
+			}
+		}
+	}
+	return result
+}
+
+func mergeValueFlowAndTXs(b *Bubble, usedBubbles map[*Bubble]struct{}) {
+	for k := range usedBubbles {
+		if k != b { // не мержим валью флоу для первого элемента, т.к. он уже был учтен в b
+			b.ValueFlow.Merge(k.ValueFlow)
+		}
+		b.Accounts = append(b.Accounts, k.Accounts...)
+		b.Transaction = append(b.Transaction, k.Transaction...)
+	}
+}
+
+// stonfiSwap represents a single swap
+type stonfiSwap struct {
+	swapTx     BubbleTx
+	transfer   *Bubble
+	payoutBody abi.StonfiPayToV2MsgBody
+}
+
+// stonfiSwap represent a swap chain involving single router
+type stonfiSingleRouterSwapChain struct {
+	router     tongo.AccountID
+	nextBubble *Bubble
+	sender     tongo.AccountID
+	in         assetTransfer
+	out        assetTransfer
+	transfer   BubbleJettonTransfer
+	// srSwaps contains intermediary swaps; the first element in the slice is the first payout made (to the next swap)
+	srSwaps     []stonfiSwap
+	inPayload   abi.StonfiSwapV2JettonPayload
+	success     bool
+	usedBubbles map[*Bubble]struct{}
+	start       *Bubble
+}
+
+// stonfiSwapMultiHop contains swaps involving multiple routers; the first element is the first swap made
+type stonfiSwapMultiHop []stonfiSingleRouterSwapChain
+
+func (spo stonfiSwap) outAddress() (*tongo.AccountID, error) {
+	amount0 := big.Int(spo.payoutBody.AdditionalInfo.Amount0Out)
+	if amount0.Cmp(big.NewInt(0)) != 0 {
+		return tongo.AccountIDFromTlb(spo.payoutBody.AdditionalInfo.Token0Address)
+	}
+	return tongo.AccountIDFromTlb(spo.payoutBody.AdditionalInfo.Token1Address)
+}
+
+func (s UniversalStonfiStraw) processMultipleRouterSwaps(b *Bubble) stonfiSwapMultiHop {
+
+	if len(b.Children) != 1 || !IsJettonTransfer(b) || !JettonTransferOperation(abi.StonfiSwapV2JettonOp)(b) {
+		return nil
+	}
+	usedBubbles := map[*Bubble]struct{}{
+		b: {},
+	}
+	transfer, ok := b.Info.(BubbleJettonTransfer)
+	if !ok || transfer.sender == nil || transfer.recipient == nil || !transfer.recipient.Is(abi.StonfiRouterV2) {
+		return nil
+	}
+	jettonPayload, ok := transfer.payload.Value.(abi.StonfiSwapV2JettonPayload)
+	if !ok {
+		return nil
+	}
+	router := transfer.recipient.Address
+	sender := transfer.sender.Address
+	in := assetTransfer{
+		Amount:       big.Int(transfer.amount),
+		JettonMaster: transfer.master,
+		JettonWallet: transfer.senderWallet,
+		IsTon:        transfer.isWrappedTon,
+	}
+
+	srSwaps, nextB, ok := s.processSingleRouterSwaps(b.Children[0], usedBubbles)
+	if !ok || len(srSwaps) == 0 {
+		return nil
+	}
+	finalTransfer, ok := srSwaps[0].transfer.Info.(BubbleJettonTransfer)
+	if !ok {
+		return nil
+	}
+	outJettonWallet, err := srSwaps[0].outAddress()
+	if err != nil || outJettonWallet == nil {
+		return nil
+	}
+	payoutAgreed := srSwaps[0].payoutBody.ExitCode == StonfiExitCode_SwapOk
+	success := payoutAgreed && finalTransfer.success
+	var out assetTransfer
+	if payoutAgreed {
+		out = assetTransfer{
+			Amount:       big.Int(finalTransfer.amount),
+			IsTon:        finalTransfer.isWrappedTon,
+			JettonWallet: *outJettonWallet,
+			JettonMaster: finalTransfer.master,
+		}
+	} else {
+		userWallet, err := tongo.AccountIDFromTlb(srSwaps[0].payoutBody.ToAddress)
+		if err != nil || userWallet == nil {
+			return nil
+		}
+		jettonPoolWallet, err := tongo.AccountIDFromTlb(jettonPayload.TokenWallet1)
+		if err != nil || jettonPoolWallet == nil {
+			return nil
+		}
+		firstSwapTx := srSwaps[len(srSwaps)-1].swapTx
+		var jettonMaster tongo.AccountID
+		if firstSwapTx.additionalInfo != nil {
+			jettonMaster, _ = firstSwapTx.additionalInfo.JettonMaster(*jettonPoolWallet)
+		}
+		out = assetTransfer{
+			Amount: big.Int(jettonPayload.CrossSwapBody.MinOut),
+			IsTon:  false,
+			// jetton wallet of user is not defined (it should have been determined by successful payout tx), so we user's normal wallet
+			JettonWallet: *userWallet,
+			JettonMaster: jettonMaster,
+		}
+	}
+	thisHop := stonfiSingleRouterSwapChain{
+		start:       b,
+		usedBubbles: usedBubbles,
+		router:      router,
+		sender:      sender,
+		in:          in,
+		out:         out,
+		nextBubble:  nextB,
+		srSwaps:     srSwaps,
+		inPayload:   jettonPayload,
+		success:     success,
+	}
+
+	// next bubble is nil only if payout have two children: referral payout and swap payout.
+	// it means that swap is finished
+	if nextB != nil {
+		// maybe this payout is going to be transferred to another router (multiple routers swap)
+		nextHops := s.processMultipleRouterSwaps(nextB)
+		if nextHops != nil {
+			delete(usedBubbles, nextB)
+			return append(nextHops, thisHop)
+		}
+	}
+
+	return []stonfiSingleRouterSwapChain{thisHop}
+}
+
+func (s UniversalStonfiStraw) processSingleRouterSwaps(b *Bubble, usedBubbles map[*Bubble]struct{}) ([]stonfiSwap, *Bubble, bool) {
+	swapTx, ok := b.Info.(BubbleTx) // same as IsTX(b)
+	if !(ok && HasOperation(abi.StonfiSwapV2MsgOp)(b) && HasInterface(abi.StonfiPoolV2)(b)) {
+		return nil, nil, false
+	}
+
+	if len(b.Children) == 0 || len(b.Children) > 2 { // according to docs pool payout can have maximum two children
+		return nil, nil, false
+	}
+
+	payoutB := b.Children[0]
+	var referrerB *Bubble
+
+	if len(b.Children) == 2 { // swap with referrer payout
+		referrerB = b.Children[0]
+		payoutB = b.Children[1]
+
+		if !IsTx(referrerB) || !HasOperation(abi.StonfiPayVaultV2MsgOp)(referrerB) || !HasInterface(abi.StonfiRouterV2)(referrerB) {
+			return nil, nil, false
+		}
+		usedBubbles[referrerB] = struct{}{}
+		if len(referrerB.Children) > 0 {
+			refPayoutBubble := referrerB.Children[0]
+			if IsTx(refPayoutBubble) && HasOperation(abi.StonfiDepositRefFeeV2MsgOp)(refPayoutBubble) && HasInterface(abi.StonfiVaultV2)(refPayoutBubble) {
+				usedBubbles[refPayoutBubble] = struct{}{}
+				if len(refPayoutBubble.Children) > 0 {
+					excessBubble := refPayoutBubble.Children[0]
+					if IsTx(excessBubble) && HasOperation(abi.ExcessMsgOp)(excessBubble) {
+						usedBubbles[excessBubble] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+
+	tx, ok := payoutB.Info.(BubbleTx)
+	if !(ok && HasOperation(abi.StonfiPayToV2MsgOp)(payoutB) && HasInterface(abi.StonfiRouterV2)(payoutB)) {
+		return nil, nil, false
+	}
+	if len(payoutB.Children) != 1 {
+		return nil, nil, false
+	}
+
+	body, ok := tx.decodedBody.Value.(abi.StonfiPayToV2MsgBody)
+	if !ok {
+		return nil, nil, false
+	}
+	nextB := payoutB.Children[0] // can be either swap msg on the same router or jetton transfer
+	payout := stonfiSwap{
+		swapTx:     swapTx,
+		payoutBody: body,
+		transfer:   nextB,
+	}
+	usedBubbles[payoutB] = struct{}{}
+	usedBubbles[nextB] = struct{}{}
+	usedBubbles[b] = struct{}{}
+	payoutChain, latestNextB, ok := s.processSingleRouterSwaps(nextB, usedBubbles)
+	if ok && latestNextB != nil {
+		return append(payoutChain, payout), latestNextB, true
+	}
+	return append(payoutChain, payout), nextB, true
+}
+
+type UniversalStonfiStraw struct{}

@@ -1,12 +1,17 @@
 package bath
 
 import (
+	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/config"
 	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/opentonapi/pkg/references"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
+	abiElector "github.com/tonkeeper/tongo/abi-tolk/abiGenerated/elector"
+	abiFfVault "github.com/tonkeeper/tongo/abi-tolk/abiGenerated/ffVault"
 	"github.com/tonkeeper/tongo/ton"
 )
 
@@ -29,7 +34,7 @@ func (ds BubbleElectionsDepositStake) ToAction() *Action {
 }
 
 var ElectionsDepositStakeStraw = Straw[BubbleElectionsDepositStake]{
-	CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ElectorNewStakeMsgOp), IsAccount(config.ElectorAddress())},
+	CheckFuncs: []bubbleCheck{IsTx, HasOperation(abiElector.ElectorNewStakeMsgOp), IsAccount(config.ElectorAddress())},
 	Builder: func(newAction *BubbleElectionsDepositStake, bubble *Bubble) error {
 		bubbleTx := bubble.Info.(BubbleTx)
 		newAction.Amount = bubbleTx.inputAmount
@@ -38,7 +43,7 @@ var ElectionsDepositStakeStraw = Straw[BubbleElectionsDepositStake]{
 	},
 	Children: []Straw[BubbleElectionsDepositStake]{
 		{
-			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ElectorNewStakeConfirmationMsgOp)},
+			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abiElector.ElectorNewStakeConfirmationMsgOp)},
 			Builder: func(newAction *BubbleElectionsDepositStake, bubble *Bubble) error {
 				newAction.Success = true
 				return nil
@@ -66,7 +71,7 @@ func (b BubbleElectionsRecoverStake) ToAction() *Action {
 }
 
 var ElectionsRecoverStakeStraw = Straw[BubbleElectionsRecoverStake]{
-	CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ElectorRecoverStakeRequestMsgOp), IsAccount(config.ElectorAddress())},
+	CheckFuncs: []bubbleCheck{IsTx, HasOperation(abiElector.ElectorRecoverStakeRequestMsgOp), IsAccount(config.ElectorAddress())},
 	Builder: func(newAction *BubbleElectionsRecoverStake, bubble *Bubble) error {
 		bubbleTx := bubble.Info.(BubbleTx)
 		newAction.Staker = bubbleTx.inputFrom.Address
@@ -74,7 +79,7 @@ var ElectionsRecoverStakeStraw = Straw[BubbleElectionsRecoverStake]{
 	},
 	Children: []Straw[BubbleElectionsRecoverStake]{
 		{
-			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ElectorRecoverStakeResponseMsgOp)},
+			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abiElector.ElectorRecoverStakeResponseMsgOp)},
 			Builder: func(newAction *BubbleElectionsRecoverStake, bubble *Bubble) error {
 				newAction.Amount = bubble.Info.(BubbleTx).inputAmount
 				newAction.Success = true
@@ -86,7 +91,7 @@ var ElectionsRecoverStakeStraw = Straw[BubbleElectionsRecoverStake]{
 
 type BubbleDepositStake struct {
 	Staker         tongo.AccountID
-	Amount         int64
+	Amount         core.Price
 	Success        bool
 	Pool           tongo.AccountID
 	Implementation core.StakingImplementation
@@ -111,7 +116,7 @@ var DepositTFStakeStraw = Straw[BubbleDepositStake]{
 		tx := bubble.Info.(BubbleTx)
 		newAction.Pool = tx.account.Address
 		newAction.Staker = tx.inputFrom.Address
-		newAction.Amount = tx.inputAmount
+		newAction.Amount = core.PriceNanoGram(tx.inputAmount)
 		newAction.Success = tx.success
 		newAction.Implementation = core.StakingImplementationTF
 		return nil
@@ -124,7 +129,7 @@ var DepositTFStakeStraw = Straw[BubbleDepositStake]{
 
 type BubbleWithdrawStakeRequest struct {
 	Staker         tongo.AccountID
-	Amount         *int64
+	Amount         *core.Price
 	Success        bool
 	Pool           tongo.AccountID
 	Implementation core.StakingImplementation
@@ -158,7 +163,7 @@ var WithdrawTFStakeRequestStraw = Straw[BubbleWithdrawStakeRequest]{
 	Children: []Straw[BubbleWithdrawStakeRequest]{
 		{
 			Optional:   true,
-			CheckFuncs: []bubbleCheck{IsTx, AmountInterval(0, int64(ton.OneTON))},
+			CheckFuncs: []bubbleCheck{IsTx, AmountInterval(0, int64(ton.OneGRAM))},
 		},
 	},
 }
@@ -194,10 +199,102 @@ var WithdrawStakeImmediatelyStraw = Straw[BubbleWithdrawStake]{
 		return nil
 	},
 	SingleChild: &Straw[BubbleWithdrawStake]{
-		CheckFuncs: []bubbleCheck{IsTx, AmountInterval(int64(ton.OneTON), 1<<63-1)},
+		CheckFuncs: []bubbleCheck{IsTx, AmountInterval(int64(ton.OneGRAM), 1<<63-1)},
 		Builder: func(newAction *BubbleWithdrawStake, bubble *Bubble) error {
 			newAction.Amount += bubble.Info.(BubbleTx).inputAmount
 			return nil
+		},
+	},
+}
+
+var DepositFFVaultStakeStraw = Straw[BubbleDepositStake]{
+	CheckFuncs: []bubbleCheck{
+		Is(BubbleJettonTransfer{}),
+		JettonTransferOperation(abiFfVault.FfVaultAssetDepositMsgOp),
+		HasInterface(abi.FfVault),
+	},
+	Builder: func(newAction *BubbleDepositStake, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		if tx.recipient == nil {
+			return fmt.Errorf("ff vault deposit: nil recipient")
+		}
+		newAction.Staker = tx.sender.Address
+		newAction.Pool = tx.recipient.Address
+		newAction.Implementation = core.StakingImplementationFfVault
+		newAction.Amount = core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: big.Int(tx.amount),
+		}
+		return nil
+	},
+	Children: []Straw[BubbleDepositStake]{
+		{
+			CheckFuncs: []bubbleCheck{func(bubble *Bubble) bool {
+				oracleRequest, ok := bubble.Info.(BubbleOraclePriceUpdate)
+				return ok && oracleRequest.Success && oracleRequest.Requester == oracleRequest.ResponseTo
+			}},
+			NotMergeBubble: true,
+			Builder: func(newAction *BubbleDepositStake, bubble *Bubble) error {
+				return nil
+			},
+			Children: []Straw[BubbleDepositStake]{
+				{
+					CheckFuncs: []bubbleCheck{
+						HasInterface(abi.FfVaultPosition),
+					},
+					Builder: func(newAction *BubbleDepositStake, bubble *Bubble) error {
+						tx := bubble.Info.(BubbleTx)
+						newAction.Success = tx.success
+						return nil
+					},
+					Children: []Straw[BubbleDepositStake]{
+						{
+							CheckFuncs: []bubbleCheck{HasOperation(abi.ExcessMsgOp)},
+							Optional:   true,
+						},
+					},
+				},
+			},
+		},
+	},
+}
+
+var WithdrawalRequestFFVaultStraw = Straw[BubbleWithdrawStakeRequest]{
+	CheckFuncs: []bubbleCheck{
+		IsTx,
+		HasOperation(abiFfVault.FfVaultUnstakeRequestMsgOp),
+		HasInterface(abi.FfVaultPosition),
+	},
+	Builder: func(newAction *BubbleWithdrawStakeRequest, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleTx)
+		if tx.additionalInfo.VaultPositionData == nil {
+			return errors.New("no vault position data in tx")
+		}
+		newAction.Staker = tx.additionalInfo.VaultPositionData.Staker
+		newAction.Pool = tx.additionalInfo.VaultPositionData.Pool
+		newAction.Success = tx.success
+		newAction.Implementation = core.StakingImplementationFfVault
+
+		opBody, ok := tx.decodedBody.Value.(*abiFfVault.UnstakeRequest)
+		if !ok || opBody == nil {
+			return errors.New("invalid tx body, expected abiFfVault.UnstakeRequest")
+		}
+		newAction.Amount = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: tx.additionalInfo.VaultPositionData.JettonMaster,
+			},
+			Amount: *big.NewInt(int64(opBody.AmountWantedToUnstake)),
+		}
+		return nil
+	},
+	Children: []Straw[BubbleWithdrawStakeRequest]{
+		{
+			CheckFuncs: []bubbleCheck{HasOperation(abi.ExcessMsgOp)},
+			Optional:   true,
 		},
 	},
 }
@@ -208,10 +305,7 @@ var DepositLiquidStakeStraw = Straw[BubbleDepositStake]{
 		tx := bubble.Info.(BubbleTx)
 		newAction.Pool = tx.account.Address
 		newAction.Staker = tx.inputFrom.Address
-		newAction.Amount = tx.inputAmount - int64(ton.OneTON)
-		if newAction.Amount < 0 {
-			newAction.Amount = 0
-		}
+		newAction.Amount = core.PriceNanoGram(max(tx.inputAmount-int64(ton.OneGRAM), 0))
 		newAction.Success = tx.success
 		newAction.Implementation = core.StakingImplementationLiquidTF
 		return nil
@@ -244,12 +338,18 @@ var WithdrawLiquidStake = Straw[BubbleWithdrawStake]{
 var PendingWithdrawRequestLiquidStraw = Straw[BubbleWithdrawStakeRequest]{
 	CheckFuncs: []bubbleCheck{Is(BubbleJettonBurn{})},
 	Builder: func(newAction *BubbleWithdrawStakeRequest, bubble *Bubble) error {
-		newAction.Staker = bubble.Info.(BubbleJettonBurn).sender.Address
+		burn := bubble.Info.(BubbleJettonBurn)
+		newAction.Staker = burn.sender.Address
 		newAction.Success = true
 		newAction.Implementation = core.StakingImplementationLiquidTF
-		amount := big.Int(bubble.Info.(BubbleJettonBurn).amount)
-		i := amount.Int64()
-		newAction.Amount = &i
+		master := burn.master
+		newAction.Amount = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &master,
+			},
+			Amount: big.Int(burn.amount),
+		}
 		return nil
 	},
 	SingleChild: &Straw[BubbleWithdrawStakeRequest]{
@@ -260,18 +360,383 @@ var PendingWithdrawRequestLiquidStraw = Straw[BubbleWithdrawStakeRequest]{
 			newAction.attachedAmount = bubble.Info.(BubbleTx).inputAmount
 			return nil
 		},
-		SingleChild: &Straw[BubbleWithdrawStakeRequest]{
-			Optional:   true,
-			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.TonstakePayoutMintJettonsMsgOp)},
-			SingleChild: &Straw[BubbleWithdrawStakeRequest]{
-				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.TonstakeNftInitMsgOp)},
+		Children: []Straw[BubbleWithdrawStakeRequest]{
+			{
+				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.TonstakePayoutMintJettonsMsgOp)},
 				SingleChild: &Straw[BubbleWithdrawStakeRequest]{
-					CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.NftOwnershipAssignedMsgOp)},
+					CheckFuncs: []bubbleCheck{Is(BubbleNftTransfer{})},
 					Builder: func(newAction *BubbleWithdrawStakeRequest, bubble *Bubble) error {
 						newAction.Success = true
 						return nil
 					},
 				},
+				Optional: true,
+			},
+			{
+				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.TonstakePayoutMintJettonsMsgOp)},
+				SingleChild: &Straw[BubbleWithdrawStakeRequest]{
+					CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.TonstakeNftInitMsgOp)},
+					SingleChild: &Straw[BubbleWithdrawStakeRequest]{
+						CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.NftOwnershipAssignedMsgOp)},
+						Builder: func(newAction *BubbleWithdrawStakeRequest, bubble *Bubble) error {
+							newAction.Success = true
+							return nil
+						},
+					},
+				},
+				Optional: true,
+			},
+		},
+	},
+}
+
+type BubbleDepositTokenStake struct {
+	Staker    tongo.AccountID
+	Success   bool
+	Protocol  core.Protocol
+	StakeMeta *core.Price
+}
+
+func (dts BubbleDepositTokenStake) ToAction() *Action {
+	return &Action{
+		DepositTokenStake: &DepositTokenStakeAction{
+			Protocol:  dts.Protocol,
+			Staker:    dts.Staker,
+			StakeMeta: dts.StakeMeta,
+		},
+		Success: dts.Success,
+		Type:    DepositTokenStake,
+	}
+}
+
+var DepositEthenaStakeStraw = Straw[BubbleDepositTokenStake]{
+	CheckFuncs: []bubbleCheck{IsJettonTransfer, JettonRecipientAccount(references.EthenaPool)},
+	Builder: func(newAction *BubbleDepositTokenStake, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		newAction.Staker = tx.sender.Address
+		amount := big.Int(tx.amount)
+		newAction.Protocol = core.Protocol{
+			Name:  references.Ethena,
+			Image: &references.EthenaImage,
+		}
+		newAction.StakeMeta = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: amount,
+		}
+		return nil
+	},
+	SingleChild: &Straw[BubbleDepositTokenStake]{
+		CheckFuncs: []bubbleCheck{Is(BubbleJettonMint{})},
+		Builder: func(newAction *BubbleDepositTokenStake, bubble *Bubble) error {
+			tx := bubble.Info.(BubbleJettonMint)
+			newAction.Success = tx.success
+			return nil
+		},
+	},
+}
+
+type BubbleWithdrawTokenStakeRequest struct {
+	Staker    tongo.AccountID
+	Success   bool
+	Protocol  core.Protocol
+	StakeMeta *core.Price
+}
+
+func (wts BubbleWithdrawTokenStakeRequest) ToAction() *Action {
+	return &Action{
+		WithdrawTokenStakeRequest: &WithdrawTokenStakeRequestAction{
+			Protocol:  wts.Protocol,
+			Staker:    wts.Staker,
+			StakeMeta: wts.StakeMeta,
+		},
+		Success: wts.Success,
+		Type:    WithdrawTokenStakeRequest,
+	}
+}
+
+var WithdrawEthenaStakeRequestStraw = Straw[BubbleWithdrawTokenStakeRequest]{
+	CheckFuncs: []bubbleCheck{IsJettonTransfer, JettonRecipientAccount(references.EthenaPool)},
+	Builder: func(newAction *BubbleWithdrawTokenStakeRequest, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		newAction.Staker = tx.sender.Address
+		amount := big.Int(tx.amount)
+		newAction.Protocol = core.Protocol{
+			Name:  references.Ethena,
+			Image: &references.EthenaImage,
+		}
+		newAction.StakeMeta = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: amount,
+		}
+		return nil
+	},
+	SingleChild: &Straw[BubbleWithdrawTokenStakeRequest]{
+		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.JettonMintMsgOp)},
+		SingleChild: &Straw[BubbleWithdrawTokenStakeRequest]{
+			CheckFuncs: []bubbleCheck{IsTx},
+			Builder: func(newAction *BubbleWithdrawTokenStakeRequest, bubble *Bubble) error {
+				tx := bubble.Info.(BubbleTx)
+				newAction.Success = tx.success
+				return nil
+			},
+		},
+	},
+}
+
+// EthenaTsUSDeTransferStraw handles plain transfers of Ethena's tsUSDe ("TON Staked USDe").
+//
+// tsUSDe routes the recipient side of a transfer through its jetton master
+// (references.EthenaTsUSDeMaster) instead of an ordinary jetton wallet, and the master's
+// internal_transfer body does not follow the standard TEP-74 layout, so it fails to decode.
+// As a result the generic JettonTransferClassicStraw can match the recipient neither by the
+// JettonWallet interface nor by the decoded JettonInternalTransfer operation: its optional
+// recipient child never attaches, BubbleJettonTransfer.success keeps its zero value (false),
+// and the action is reported as "failed" even though every transaction in the trace succeeded.
+//
+// This straw gates the recipient bubble on the raw internal_transfer opcode (HasOpcode, which
+// does not need the body to decode) so success is taken from the actual recipient transaction.
+// It must be registered before the generic jetton straws so it wins the match.
+var EthenaTsUSDeTransferStraw = Straw[BubbleJettonTransfer]{
+	CheckFuncs: []bubbleCheck{IsTx, HasInterface(abi.JettonWallet), HasOperation(abi.JettonTransferMsgOp)},
+	Builder: func(newAction *BubbleJettonTransfer, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleTx)
+		newAction.master, _ = tx.additionalInfo.JettonMaster(tx.account.Address)
+		newAction.senderWallet = tx.account.Address
+		newAction.sender = tx.inputFrom
+		body := tx.decodedBody.Value.(abi.JettonTransferMsgBody)
+		newAction.amount = body.Amount
+		newAction.payload = body.ForwardPayload.Value
+		recipient, err := ton.AccountIDFromTlb(body.Destination)
+		if err == nil && recipient != nil {
+			newAction.recipient = &Account{Address: *recipient}
+			bubble.Accounts = append(bubble.Accounts, *recipient)
+		}
+		return nil
+	},
+	SingleChild: &Straw[BubbleJettonTransfer]{
+		CheckFuncs: []bubbleCheck{IsTx, IsAccount(references.EthenaTsUSDeMaster), HasOpcode(abi.JettonInternalTransferMsgOpCode)},
+		Builder: func(newAction *BubbleJettonTransfer, bubble *Bubble) error {
+			tx := bubble.Info.(BubbleTx)
+			newAction.recipientWallet = tx.account.Address
+			if newAction.master.IsZero() {
+				newAction.master, _ = tx.additionalInfo.JettonMaster(tx.account.Address)
+			}
+			newAction.success = tx.success
+			return nil
+		},
+		ValueFlowUpdater: func(newAction *BubbleJettonTransfer, flow *ValueFlow) {
+			if newAction.success {
+				if newAction.recipient != nil {
+					flow.AddJettons(newAction.recipient.Address, newAction.master, big.Int(newAction.amount))
+				}
+				if newAction.sender != nil {
+					flow.SubJettons(newAction.sender.Address, newAction.master, big.Int(newAction.amount))
+				}
+			}
+		},
+		Children: []Straw[BubbleJettonTransfer]{
+			{
+				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.JettonNotifyMsgOp), IsAccount(references.EthenaPool)},
+				Optional:   true,
+			},
+			{
+				CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+				Optional:   true,
+			},
+		},
+	},
+}
+
+var DepositAffluentEarnStraw = Straw[BubbleDepositTokenStake]{
+	CheckFuncs: []bubbleCheck{IsJettonTransfer, func(bubble *Bubble) bool {
+		tx, _ := bubble.Info.(BubbleJettonTransfer)
+		return tx.recipient != nil && (tx.recipient.Is(abi.AffluentLendingVault) || tx.recipient.Is(abi.AffluentMultiplyVault))
+	}},
+	Builder: func(newAction *BubbleDepositTokenStake, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		newAction.Protocol = core.Protocol{
+			Name:  references.Affluent,
+			Image: &references.AffluentImage,
+		}
+		newAction.Staker = tx.sender.Address
+		amount := big.Int(tx.amount)
+		newAction.StakeMeta = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: amount,
+		}
+		return nil
+	},
+	SingleChild: &Straw[BubbleDepositTokenStake]{
+		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.JettonInternalTransferMsgOp)},
+		Builder: func(newAction *BubbleDepositTokenStake, bubble *Bubble) error {
+			tx := bubble.Info.(BubbleTx)
+			newAction.Success = tx.success
+			return nil
+		},
+		SingleChild: &Straw[BubbleDepositTokenStake]{
+			CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+		},
+	},
+}
+
+var DepositAffluentEarnWithOraclesStraw = Straw[BubbleDepositTokenStake]{
+	CheckFuncs: []bubbleCheck{IsJettonTransfer, func(bubble *Bubble) bool {
+		tx, _ := bubble.Info.(BubbleJettonTransfer)
+		return tx.recipient != nil && (tx.recipient.Is(abi.AffluentLendingVault) || tx.recipient.Is(abi.AffluentMultiplyVault))
+	}},
+	Builder: func(newAction *BubbleDepositTokenStake, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		newAction.Protocol = core.Protocol{
+			Name:  references.Affluent,
+			Image: &references.AffluentImage,
+		}
+		newAction.Staker = tx.sender.Address
+		amount := big.Int(tx.amount)
+		newAction.StakeMeta = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: amount,
+		}
+		return nil
+	},
+	SingleChild: &Straw[BubbleDepositTokenStake]{
+		CheckFuncs: []bubbleCheck{IsTx, HasOpcode(0xb0c69ffe)},
+		Children: []Straw[BubbleDepositTokenStake]{
+			{
+				CheckFuncs: []bubbleCheck{IsTx, Or(HasOpcode(0x2a75c2f1), HasOpcode(0xf1cafcb2))},
+				SingleChild: &Straw[BubbleDepositTokenStake]{
+					CheckFuncs: []bubbleCheck{IsTx, Or(HasOpcode(0xb675cea5), HasOpcode(0xab7bef17))},
+					SingleChild: &Straw[BubbleDepositTokenStake]{
+						CheckFuncs: []bubbleCheck{IsTx, HasOpcode(0x77c65602)},
+						SingleChild: &Straw[BubbleDepositTokenStake]{
+							CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.JettonInternalTransferMsgOp)},
+							Builder: func(newAction *BubbleDepositTokenStake, bubble *Bubble) error {
+								tx := bubble.Info.(BubbleTx)
+								newAction.Success = tx.success
+								return nil
+							},
+							SingleChild: &Straw[BubbleDepositTokenStake]{
+								CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+							},
+						},
+					},
+				},
+			},
+			{
+				CheckFuncs: []bubbleCheck{Is(BubbleContractDeploy{})},
+			},
+		},
+	},
+}
+
+var WithdrawAffluentEarnRequestStraw = Straw[BubbleWithdrawTokenStakeRequest]{
+	CheckFuncs: []bubbleCheck{IsJettonTransfer, func(bubble *Bubble) bool {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		return tx.recipient != nil && tx.recipient.Is(abi.AffluentBatch)
+	}},
+	Builder: func(newAction *BubbleWithdrawTokenStakeRequest, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonTransfer)
+		newAction.Protocol = core.Protocol{
+			Name:  references.Affluent,
+			Image: &references.AffluentImage,
+		}
+		newAction.Staker = tx.sender.Address
+		amount := big.Int(tx.amount)
+		newAction.StakeMeta = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: amount,
+		}
+		newAction.Success = tx.success
+		return nil
+	},
+	SingleChild: &Straw[BubbleWithdrawTokenStakeRequest]{
+		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ExcessMsgOp)},
+	},
+}
+
+var InstantWithdrawAffluentEarnStraw = Straw[BubbleWithdrawTokenStakeRequest]{
+	CheckFuncs: []bubbleCheck{Is(BubbleJettonBurn{}), func(bubble *Bubble) bool {
+		if len(bubble.Children) < 1 {
+			return false
+		}
+		tx, ok := bubble.Children[0].Info.(BubbleJettonTransfer)
+		if !ok {
+			return false
+		}
+		return tx.sender.Is(abi.AffluentMultiplyVault) || tx.sender.Is(abi.AffluentLendingVault)
+	}},
+	Builder: func(newAction *BubbleWithdrawTokenStakeRequest, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonBurn)
+		newAction.Protocol = core.Protocol{
+			Name:  references.Affluent,
+			Image: &references.AffluentImage,
+		}
+		newAction.Staker = tx.sender.Address
+		amount := big.Int(tx.amount)
+		newAction.StakeMeta = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: amount,
+		}
+		newAction.Success = tx.success
+		return nil
+	},
+}
+
+var InstantWithdrawAffluentEarnWithOraclesStraw = Straw[BubbleWithdrawTokenStakeRequest]{
+	CheckFuncs: []bubbleCheck{Is(BubbleJettonBurn{})},
+	Builder: func(newAction *BubbleWithdrawTokenStakeRequest, bubble *Bubble) error {
+		tx := bubble.Info.(BubbleJettonBurn)
+		newAction.Protocol = core.Protocol{
+			Name:  references.Affluent,
+			Image: &references.AffluentImage,
+		}
+		newAction.Staker = tx.sender.Address
+		amount := big.Int(tx.amount)
+		newAction.StakeMeta = &core.Price{
+			Currency: core.Currency{
+				Type:   core.CurrencyJetton,
+				Jetton: &tx.master,
+			},
+			Amount: amount,
+		}
+		return nil
+	},
+	SingleChild: &Straw[BubbleWithdrawTokenStakeRequest]{
+		CheckFuncs: []bubbleCheck{IsTx, HasOperation(abi.ProvideAggregatedDataWithdrawMsgOp)},
+		Children: []Straw[BubbleWithdrawTokenStakeRequest]{
+			{
+				CheckFuncs: []bubbleCheck{IsTx, Or(HasOpcode(0x2a75c2f1), HasOpcode(0xf1cafcb2))},
+				SingleChild: &Straw[BubbleWithdrawTokenStakeRequest]{
+					CheckFuncs: []bubbleCheck{IsTx, Or(HasOpcode(0xb675cea5), HasOpcode(0xab7bef17))},
+					SingleChild: &Straw[BubbleWithdrawTokenStakeRequest]{
+						CheckFuncs: []bubbleCheck{IsTx, HasOpcode(0x77c65602), Or(HasInterface(abi.AffluentMultiplyVault), HasInterface(abi.AffluentLendingVault))},
+						Builder: func(newAction *BubbleWithdrawTokenStakeRequest, bubble *Bubble) error {
+							tx := bubble.Info.(BubbleTx)
+							newAction.Success = tx.success
+							return nil
+						},
+					},
+				},
+			},
+			{
+				CheckFuncs: []bubbleCheck{Is(BubbleContractDeploy{})},
 			},
 		},
 	},

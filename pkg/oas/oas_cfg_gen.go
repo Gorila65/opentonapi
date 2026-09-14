@@ -4,17 +4,21 @@ package oas
 
 import (
 	"net/http"
+	"strings"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/trace"
-
+	ht "github.com/ogen-go/ogen/http"
 	"github.com/ogen-go/ogen/middleware"
 	"github.com/ogen-go/ogen/ogenerrors"
 	"github.com/ogen-go/ogen/otelogen"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
+	// Allocate option closure once.
+	clientSpanKind = trace.WithSpanKind(trace.SpanKindClient)
 	// Allocate option closure once.
 	serverSpanKind = trace.WithSpanKind(trace.SpanKindServer)
 )
@@ -29,6 +33,7 @@ type otelConfig struct {
 	Tracer         trace.Tracer
 	MeterProvider  metric.MeterProvider
 	Meter          metric.Meter
+	Attributes     []attribute.KeyValue
 }
 
 func (cfg *otelConfig) initOTEL() {
@@ -41,7 +46,9 @@ func (cfg *otelConfig) initOTEL() {
 	cfg.Tracer = cfg.TracerProvider.Tracer(otelogen.Name,
 		trace.WithInstrumentationVersion(otelogen.SemVersion()),
 	)
-	cfg.Meter = cfg.MeterProvider.Meter(otelogen.Name)
+	cfg.Meter = cfg.MeterProvider.Meter(otelogen.Name,
+		metric.WithInstrumentationVersion(otelogen.SemVersion()),
+	)
 }
 
 // ErrorHandler is error handler.
@@ -76,18 +83,8 @@ func (o otelOptionFunc) applyServer(c *serverConfig) {
 
 func newServerConfig(opts ...ServerOption) serverConfig {
 	cfg := serverConfig{
-		NotFound: http.NotFound,
-		MethodNotAllowed: func(w http.ResponseWriter, r *http.Request, allowed string) {
-			status := http.StatusMethodNotAllowed
-			if r.Method == "OPTIONS" {
-				w.Header().Set("Access-Control-Allow-Methods", allowed)
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-				status = http.StatusNoContent
-			} else {
-				w.Header().Set("Allow", allowed)
-			}
-			w.WriteHeader(status)
-		},
+		NotFound:           http.NotFound,
+		MethodNotAllowed:   nil,
 		ErrorHandler:       ogenerrors.DefaultErrorHandler,
 		Middleware:         nil,
 		MaxMultipartMemory: 32 << 20, // 32 MB
@@ -110,27 +107,118 @@ func (s baseServer) notFound(w http.ResponseWriter, r *http.Request) {
 	s.cfg.NotFound(w, r)
 }
 
-func (s baseServer) notAllowed(w http.ResponseWriter, r *http.Request, allowed string) {
-	s.cfg.MethodNotAllowed(w, r, allowed)
+type notAllowedParams struct {
+	allowedMethods string
+	allowedHeaders map[string]string
+	acceptPost     string
+	acceptPatch    string
+}
+
+func (s baseServer) notAllowed(w http.ResponseWriter, r *http.Request, params notAllowedParams) {
+	h := w.Header()
+	isOptions := r.Method == "OPTIONS"
+	if isOptions {
+		h.Set("Access-Control-Allow-Methods", params.allowedMethods)
+		if params.allowedHeaders != nil {
+			m := r.Header.Get("Access-Control-Request-Method")
+			if m != "" {
+				allowedHeaders, ok := params.allowedHeaders[strings.ToUpper(m)]
+				if ok {
+					h.Set("Access-Control-Allow-Headers", allowedHeaders)
+				}
+			}
+		}
+		if params.acceptPost != "" {
+			h.Set("Accept-Post", params.acceptPost)
+		}
+		if params.acceptPatch != "" {
+			h.Set("Accept-Patch", params.acceptPatch)
+		}
+	}
+	if s.cfg.MethodNotAllowed != nil {
+		s.cfg.MethodNotAllowed(w, r, params.allowedMethods)
+		return
+	}
+	status := http.StatusNoContent
+	if !isOptions {
+		h.Set("Allow", params.allowedMethods)
+		status = http.StatusMethodNotAllowed
+	}
+	w.WriteHeader(status)
 }
 
 func (cfg serverConfig) baseServer() (s baseServer, err error) {
 	s = baseServer{cfg: cfg}
-	if s.requests, err = s.cfg.Meter.Int64Counter(otelogen.ServerRequestCount); err != nil {
+	if s.requests, err = otelogen.ServerRequestCountCounter(s.cfg.Meter); err != nil {
 		return s, err
 	}
-	if s.errors, err = s.cfg.Meter.Int64Counter(otelogen.ServerErrorsCount); err != nil {
+	if s.errors, err = otelogen.ServerErrorsCountCounter(s.cfg.Meter); err != nil {
 		return s, err
 	}
-	if s.duration, err = s.cfg.Meter.Float64Histogram(otelogen.ServerDuration); err != nil {
+	if s.duration, err = otelogen.ServerDurationHistogram(s.cfg.Meter); err != nil {
 		return s, err
 	}
 	return s, nil
 }
 
+type clientConfig struct {
+	otelConfig
+	Client ht.Client
+}
+
+// ClientOption is client config option.
+type ClientOption interface {
+	applyClient(*clientConfig)
+}
+
+var _ ClientOption = (optionFunc[clientConfig])(nil)
+
+func (o optionFunc[C]) applyClient(c *C) {
+	o(c)
+}
+
+var _ ClientOption = (otelOptionFunc)(nil)
+
+func (o otelOptionFunc) applyClient(c *clientConfig) {
+	o(&c.otelConfig)
+}
+
+func newClientConfig(opts ...ClientOption) clientConfig {
+	cfg := clientConfig{
+		Client: http.DefaultClient,
+	}
+	for _, opt := range opts {
+		opt.applyClient(&cfg)
+	}
+	cfg.initOTEL()
+	return cfg
+}
+
+type baseClient struct {
+	cfg      clientConfig
+	requests metric.Int64Counter
+	errors   metric.Int64Counter
+	duration metric.Float64Histogram
+}
+
+func (cfg clientConfig) baseClient() (c baseClient, err error) {
+	c = baseClient{cfg: cfg}
+	if c.requests, err = otelogen.ClientRequestCountCounter(c.cfg.Meter); err != nil {
+		return c, err
+	}
+	if c.errors, err = otelogen.ClientErrorsCountCounter(c.cfg.Meter); err != nil {
+		return c, err
+	}
+	if c.duration, err = otelogen.ClientDurationHistogram(c.cfg.Meter); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
 // Option is config option.
 type Option interface {
 	ServerOption
+	ClientOption
 }
 
 // WithTracerProvider specifies a tracer provider to use for creating a tracer.
@@ -151,6 +239,22 @@ func WithMeterProvider(provider metric.MeterProvider) Option {
 	return otelOptionFunc(func(cfg *otelConfig) {
 		if provider != nil {
 			cfg.MeterProvider = provider
+		}
+	})
+}
+
+// WithAttributes specifies default otel attributes.
+func WithAttributes(attributes ...attribute.KeyValue) Option {
+	return otelOptionFunc(func(cfg *otelConfig) {
+		cfg.Attributes = attributes
+	})
+}
+
+// WithClient specifies http client to use.
+func WithClient(client ht.Client) ClientOption {
+	return optionFunc[clientConfig](func(cfg *clientConfig) {
+		if client != nil {
+			cfg.Client = client
 		}
 	})
 }

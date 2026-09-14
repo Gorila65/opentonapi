@@ -3,16 +3,23 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"sync"
+
+	"log/slog"
 
 	"github.com/go-faster/errors"
 	"github.com/tonkeeper/opentonapi/pkg/chainstate"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/rates"
+	rewards "github.com/tonkeeper/opentonapi/pkg/rewards/service"
 	"github.com/tonkeeper/opentonapi/pkg/score"
 	"github.com/tonkeeper/opentonapi/pkg/verifier"
 	"github.com/tonkeeper/tongo"
+	"github.com/tonkeeper/tongo/config"
 	"github.com/tonkeeper/tongo/contract/dns"
+	"github.com/tonkeeper/tongo/liteapi"
 	"github.com/tonkeeper/tongo/tep64"
 	"github.com/tonkeeper/tongo/ton"
 	"github.com/tonkeeper/tongo/tonconnect"
@@ -46,11 +53,20 @@ type Handler struct {
 	metaCache      metadataCache
 	tonConnect     *tonconnect.Server
 	verifierSource verifierSource
+	defiAssets     defiAssetsSource
+	rewards        *rewards.Service
+	stats          *rewards.Stats
+	publicAPIURL   string
 
+	// parallelTraceProcessing enables parallel trace-to-action conversion.
+	parallelTraceProcessing bool
+	// nftTrustNoneEnabled reports an unreviewed NFT item as TrustNone instead of TrustBlacklist.
+	nftTrustNoneEnabled bool
 	// mempoolEmulate contains results of emulation of messages that are in the mempool.
 	mempoolEmulate mempoolEmulate
 	// ctxToDetails converts a request context to a details instance.
 	ctxToDetails ctxToDetails
+	tongoVersion int
 
 	// mempoolEmulateIgnoreAccounts, we don't track pending transactions for this list of accounts.
 	mempoolEmulateIgnoreAccounts map[tongo.AccountID]struct{}
@@ -68,24 +84,34 @@ type Handler struct {
 }
 
 func (h *Handler) NewError(ctx context.Context, err error) *oas.ErrorStatusCode {
-	return new(oas.ErrorStatusCode)
+	var e *oas.ErrorStatusCode
+	if errors.As(err, &e) {
+		return e
+	}
+	return toError(http.StatusInternalServerError, err)
 }
 
 // Options configures behavior of a Handler instance.
 type Options struct {
-	storage          storage
-	chainState       chainState
-	addressBook      addressBook
-	msgSender        messageSender
-	executor         executor
-	limits           Limits
-	spamFilter       SpamFilter
-	ratesSource      ratesSource
-	tonConnectSecret string
-	ctxToDetails     ctxToDetails
-	gasless          Gasless
-	verifier         verifierSource
-	score            scoreSource
+	storage                 storage
+	chainState              chainState
+	addressBook             addressBook
+	msgSender               messageSender
+	executor                executor
+	limits                  Limits
+	spamFilter              SpamFilter
+	ratesSource             ratesSource
+	tonConnectSecret        string
+	ctxToDetails            ctxToDetails
+	gasless                 Gasless
+	verifier                verifierSource
+	defiAssets              defiAssetsSource
+	score                   scoreSource
+	parallelTraceProcessing bool
+	nftTrustNoneEnabled     bool
+	archiveLiteServers      []config.LiteServer
+	archiveClient           rewards.LiteClient
+	publicAPIURL            string
 }
 
 type Option func(o *Options)
@@ -167,6 +193,51 @@ func WithScore(score scoreSource) Option {
 	}
 }
 
+// WithDefiAssets configures the source of an account's defi positions
+// (staking, lending, liquidity pools, etc.) used by GetAccountDefiAssets.
+// When not set, GetAccountDefiAssets returns an empty result.
+func WithDefiAssets(source defiAssetsSource) Option {
+	return func(o *Options) {
+		o.defiAssets = source
+	}
+}
+
+func WithParallelTraceProcessing(enabled bool) Option {
+	return func(o *Options) {
+		o.parallelTraceProcessing = enabled
+	}
+}
+
+func WithNftTrustNoneEnabled(enabled bool) Option {
+	return func(o *Options) {
+		o.nftTrustNoneEnabled = enabled
+	}
+}
+
+func WithArchiveLiteServers(s []config.LiteServer) Option {
+	return func(o *Options) {
+		o.archiveLiteServers = s
+	}
+}
+
+// WithArchiveClient supplies the blockchain connection the rewards service
+// reads validator history through, instead of NewHandler building one from the
+// servers given to WithArchiveLiteServers. It is how a deployment running its
+// own lightserver pool keeps the rewards service on that pool rather than
+// opening a second one; when set, WithArchiveLiteServers is not used to
+// construct a client.
+func WithArchiveClient(cli rewards.LiteClient) Option {
+	return func(o *Options) {
+		o.archiveClient = cli
+	}
+}
+
+func WithPublicAPIURL(publicAPIURL string) Option {
+	return func(o *Options) {
+		o.publicAPIURL = publicAPIURL
+	}
+}
+
 func NewHandler(logger *zap.Logger, opts ...Option) (*Handler, error) {
 	options := &Options{}
 	for _, o := range opts {
@@ -218,6 +289,34 @@ func NewHandler(logger *zap.Logger, opts ...Option) (*Handler, error) {
 	if options.score == nil {
 		options.score = score.NewScore()
 	}
+	if options.publicAPIURL == "" {
+		options.publicAPIURL = "https://tonapi.io"
+	}
+	tongoVersion, err := GetPackageVersionInt("tongo")
+	if err != nil {
+		slog.Warn("unable to detect tongo version", "err", err)
+	}
+	var rwd *rewards.Service
+	var stats *rewards.Stats
+	switch {
+	case options.archiveClient != nil:
+		// A supplied client keeps its own connections, so there is no server
+		// list to hand the service for rebuilding one.
+		rwd = rewards.New(options.archiveClient, nil)
+		stats = rewards.NewStatsWithClient(options.archiveClient)
+		log.Println("rewards service initialized on the supplied client")
+	default:
+		stats = rewards.NewStats(liteapi.WithLiteServers(options.archiveLiteServers))
+		if len(options.archiveLiteServers) != 0 {
+			cli, err := rewards.NewClient(options.archiveLiteServers)
+			if err == nil {
+				rwd = rewards.New(cli, options.archiveLiteServers)
+				log.Println("rewards service initialized")
+			} else {
+				log.Println("rewards service unavailable:", err)
+			}
+		}
+	}
 	return &Handler{
 		logger:         logger,
 		storage:        options.storage,
@@ -232,30 +331,40 @@ func NewHandler(logger *zap.Logger, opts ...Option) (*Handler, error) {
 		score:          options.score,
 		ratesSource:    rates.InitCalculator(options.ratesSource),
 		verifierSource: options.verifier,
+		defiAssets:     options.defiAssets,
+		publicAPIURL:   options.publicAPIURL,
 		metaCache: metadataCache{
-			collectionsCache: cache.NewLRUCache[tongo.AccountID, tep64.Metadata](10000, "nft_metadata_cache"),
+			collectionsCache: cache.NewLRUCache[tongo.AccountID, collectionMeta](10000, "nft_metadata_cache"),
 			jettonsCache:     cache.NewLRUCache[tongo.AccountID, tep64.Metadata](10000, "jetton_metadata_cache"),
 			storage:          options.storage,
 		},
 		mempoolEmulate: mempoolEmulate{
-			traces:         cache.NewLRUCache[ton.Bits256, *core.Trace](10000, "mempool_traces_cache"),
 			accountsTraces: cache.NewLRUCache[tongo.AccountID, []ton.Bits256](10000, "accounts_traces_cache"),
 		},
 		mempoolEmulateIgnoreAccounts: map[tongo.AccountID]struct{}{
 			tongo.MustParseAddress("0:0000000000000000000000000000000000000000000000000000000000000000").ID: {},
 		},
-		blacklistedBocCache: cache.NewLRUCache[[32]byte, struct{}](100000, "blacklisted_boc_cache"),
-		getMethodsCache:     cache.NewLRUCache[string, *oas.MethodExecutionResult](100000, "get_methods_cache"),
-		tonConnect:          tonConnect,
-		configPool:          configPool,
+		parallelTraceProcessing: options.parallelTraceProcessing,
+		nftTrustNoneEnabled:     options.nftTrustNoneEnabled,
+		tongoVersion:            tongoVersion,
+		blacklistedBocCache:     cache.NewLRUCache[[32]byte, struct{}](100000, "blacklisted_boc_cache"),
+		getMethodsCache:         cache.NewLRUCache[string, *oas.MethodExecutionResult](100000, "get_methods_cache"),
+		tonConnect:              tonConnect,
+		configPool:              configPool,
+		rewards:                 rwd,
+		stats:                   stats,
 	}, nil
 }
 
 func (h *Handler) GetJettonNormalizedMetadata(ctx context.Context, master tongo.AccountID) NormalizedMetadata {
 	meta, _ := h.metaCache.getJettonMeta(ctx, master)
 	// TODO: should we ignore the second returned value?
+	return h.normalizeJettonMetadata(master, meta)
+}
+
+func (h *Handler) normalizeJettonMetadata(master tongo.AccountID, meta tep64.Metadata) NormalizedMetadata {
 	if info, ok := h.addressBook.GetJettonInfoByAddress(master); ok {
-		return NormalizeMetadata(meta, &info, core.TrustNone)
+		return NormalizeMetadata(master, meta, &info, core.TrustNone)
 	}
-	return NormalizeMetadata(meta, nil, h.spamFilter.JettonTrust(master, meta.Symbol, meta.Name, meta.Image))
+	return NormalizeMetadata(master, meta, nil, h.spamFilter.JettonTrust(master, meta.Symbol, meta.Name, meta.Image))
 }

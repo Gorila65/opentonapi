@@ -1,0 +1,83 @@
+{
+   "Actions": [
+     {
+       "WithdrawStakeRequest": {
+         "Staker": "0:18ad6afae9ec302784e12d298bc152b338ef1ae288dfd72e814fa29ee62a7ff5",
+         "Amount": {
+           "Currency": {
+             "Type": "jetton",
+             "Jetton": "0:bdf3fa8098d129b54b4f73b5bac5d1e1fd91eb054169c3916dfc8ccd536d1000",
+             "CurrencyID": null
+           },
+           "Amount": 931632278
+         },
+         "Pool": "0:a45b17f28409229b78360e3290420f13e4fe20f90d7e2bf8c4ac6703259e22fa",
+         "Implementation": "liquidTF"
+       },
+       "Success": true,
+       "Type": "WithdrawStakeRequest",
+       "BaseTransactions": [
+         "aa8e26131d7fd624b95413e9550dae52af2e4d9f082ac9c75eb3e451a0fda2a2",
+         "46006fd0e3c6513c1b4e8fb8228ad44cbf29648b69331d6b6430238dbafe60c9",
+         "90545da9a66b833f4776a87363417143d13aecc36a18960a70d2a22e8961ec73",
+         "327c8d4229c4657bca2b0fb813b9f9fb79e5cf7a90cbd8666b7d8801a61032a2",
+         "d98fa66dc3dcff87922b65903341f1b6cdd7c6ed8259b598a31a0ec8c39e55e5",
+         "7ae744a2aa6cfceb89ed72a744895af2a970175c6969346f7af7871759d00945"
+       ]
+     },
+     {
+       "ContractDeploy": {
+         "Address": "0:960c9733c9bb73ac71dc85d0938e1acca79568f73671ad725a1aaec1aa2c2ee1",
+         "Interfaces": null
+       },
+       "Success": true,
+       "Type": "ContractDeploy",
+       "BaseTransactions": [
+         "d98fa66dc3dcff87922b65903341f1b6cdd7c6ed8259b598a31a0ec8c39e55e5"
+       ]
+     }
+   ],
+   "Accounts": [
+     {
+       "Account": "0:18ad6afae9ec302784e12d298bc152b338ef1ae288dfd72e814fa29ee62a7ff5",
+       "Ton": -121890831,
+       "Fee": 3830831,
+       "Jettons": [
+         {
+           "Address": "0:bdf3fa8098d129b54b4f73b5bac5d1e1fd91eb054169c3916dfc8ccd536d1000",
+           "Quantity": -931632278
+         }
+       ]
+     },
+     {
+       "Account": "0:960c9733c9bb73ac71dc85d0938e1acca79568f73671ad725a1aaec1aa2c2ee1",
+       "Ton": 90000000,
+       "Fee": 3064800,
+       "Jettons": null
+     },
+     {
+       "Account": "0:a45b17f28409229b78360e3290420f13e4fe20f90d7e2bf8c4ac6703259e22fa",
+       "Ton": -731,
+       "Fee": 9548331,
+       "Jettons": null
+     },
+     {
+       "Account": "0:bdf3fa8098d129b54b4f73b5bac5d1e1fd91eb054169c3916dfc8ccd536d1000",
+       "Ton": -208,
+       "Fee": 4083008,
+       "Jettons": null
+     },
+     {
+       "Account": "0:d478858814e43d821d8dabdfcb8035d75c91bad1c889773c43081d82645a19e1",
+       "Ton": -128237,
+       "Fee": 3258637,
+       "Jettons": null
+     },
+     {
+       "Account": "0:ed87ef7782087fcbf900a6417b605e204d8a7cca9218bf279d77f9c0360387d5",
+       "Ton": -193,
+       "Fee": 8234593,
+       "Jettons": null
+     }
+   ]
+ }

@@ -2,6 +2,7 @@ package litestorage
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -18,6 +19,10 @@ import (
 )
 
 func TestLiteStorage_run(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 	require.Nil(t, err)
 
@@ -77,11 +82,15 @@ func TestLiteStorage_run(t *testing.T) {
 }
 
 func TestLiteStorage_runBlockchainConfigUpdate(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 	require.Nil(t, err)
 	s := &LiteStorage{
 		logger: zap.L(),
-		client: cli,
+		client: core.LiteAPIClient(cli),
 	}
 	s.runBlockchainConfigUpdate(100 * time.Millisecond)
 
@@ -96,7 +105,7 @@ func TestLiteStorage_TrimmedConfigBase64(t *testing.T) {
 	require.Nil(t, err)
 	s := &LiteStorage{
 		logger: zap.L(),
-		client: cli,
+		client: core.LiteAPIClient(cli),
 	}
 	conf := s.blockchainConfig()
 	require.Empty(t, conf)

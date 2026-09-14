@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 
 	imgGenerator "github.com/tonkeeper/opentonapi/pkg/image"
@@ -19,7 +20,7 @@ import (
 func convertToRawAccount(account *core.Account) (oas.BlockchainRawAccount, error) {
 	rawAccount := oas.BlockchainRawAccount{
 		Address:           account.AccountAddress.ToRaw(),
-		Balance:           account.TonBalance,
+		Balance:           account.GramBalance,
 		LastTransactionLt: int64(account.LastTransactionLt),
 		Status:            oas.AccountStatus(account.Status),
 		Storage: oas.AccountStorageInfo{
@@ -60,14 +61,9 @@ func convertToRawAccount(account *core.Account) (oas.BlockchainRawAccount, error
 		}
 	}
 	if account.ExtraBalances != nil {
-		balances := make(map[string]string, len(account.ExtraBalances))
-		for key, value := range account.ExtraBalances {
-			v := big.Int(value)
-			balances[fmt.Sprintf("%v", key)] = fmt.Sprintf("%v", v.String())
-		}
-		rawAccount.ExtraBalance = oas.NewOptBlockchainRawAccountExtraBalance(balances)
+		rawAccount.ExtraBalance = convertExtraCurrencies(account.ExtraBalances)
 	}
-	if account.Code != nil && len(account.Code) != 0 {
+	if len(account.Code) != 0 {
 		rawAccount.Code = oas.NewOptString(fmt.Sprintf("%x", account.Code[:]))
 	}
 	if account.Data != nil {
@@ -95,30 +91,25 @@ func convertExtraCurrencies(extraBalances core.ExtraCurrencies) []oas.ExtraCurre
 	return res
 }
 
+func isNftCollection(account *core.Account) bool {
+	return slices.Contains(account.Interfaces, abi.NftCollection)
+}
+
 func convertToAccount(account *core.Account, ab *addressbook.KnownAddress, state chainState, spamFilter SpamFilter) oas.Account {
 	acc := oas.Account{
 		Address:      account.AccountAddress.ToRaw(),
-		Balance:      account.TonBalance,
+		Balance:      account.GramBalance,
 		LastActivity: account.LastActivityTime,
 		Status:       oas.AccountStatus(account.Status),
 		Interfaces:   make([]string, len(account.Interfaces)),
 		GetMethods:   account.GetMethods,
+		IsWallet:     checkIsWallet(account),
 	}
 	for i, iface := range account.Interfaces {
 		acc.Interfaces[i] = iface.String()
 	}
 	if state.CheckIsSuspended(account.AccountAddress) {
 		acc.IsSuspended.SetTo(true)
-	}
-	if account.Status == tlb.AccountUninit || account.Status == tlb.AccountNone {
-		acc.IsWallet = true
-	} else {
-		for _, i := range account.Interfaces {
-			if i.Implements(abi.Wallet) {
-				acc.IsWallet = true
-				break
-			}
-		}
 	}
 	trust := spamFilter.AccountTrust(account.AccountAddress)
 	if trust == core.TrustBlacklist {
@@ -138,4 +129,68 @@ func convertToAccount(account *core.Account, ab *addressbook.KnownAddress, state
 	}
 	acc.MemoRequired = oas.NewOptBool(ab.RequireMemo)
 	return acc
+}
+
+func convertToWallet(
+	account *core.Account,
+	ab *addressbook.KnownAddress,
+	state chainState,
+	stats core.AccountStat,
+	plugins []core.Plugin,
+	signatureAllowed *bool,
+) oas.Wallet {
+	wallet := oas.Wallet{
+		Address:      account.AccountAddress.ToRaw(),
+		Balance:      account.GramBalance,
+		LastActivity: account.LastActivityTime,
+		GetMethods:   []string{},
+		Status:       oas.AccountStatus(account.Status),
+		IsWallet:     checkIsWallet(account),
+		Interfaces:   make([]string, len(account.Interfaces)),
+		Stats: oas.WalletStats{
+			NftsCount:     stats.NftsCount,
+			JettonsCount:  stats.JettonsCount,
+			MultisigCount: stats.MultisigCount,
+			StakingCount:  stats.StakingCount,
+		},
+		LastLt: int64(account.LastTransactionLt),
+	}
+	for i, iface := range account.Interfaces {
+		wallet.Interfaces[i] = iface.String()
+	}
+	for _, plugin := range plugins {
+		wallet.Plugins = append(wallet.Plugins, oas.WalletPlugin{
+			Address: plugin.AccountID.ToRaw(),
+			Type:    plugin.Type,
+			Status:  oas.AccountStatus(plugin.Status),
+		})
+	}
+	if state.CheckIsSuspended(account.AccountAddress) {
+		wallet.IsSuspended.SetTo(true)
+	}
+	if signatureAllowed != nil {
+		wallet.SignatureDisabled.SetTo(!*signatureAllowed)
+	}
+	if ab == nil {
+		return wallet
+	}
+	if len(ab.Name) > 0 {
+		wallet.Name = oas.NewOptString(ab.Name)
+	}
+	if len(ab.Image) > 0 {
+		wallet.Icon = oas.NewOptString(imgGenerator.DefaultGenerator.GenerateImageUrl(ab.Image, 200, 200))
+	}
+	return wallet
+}
+
+func checkIsWallet(account *core.Account) bool {
+	if account.Status == tlb.AccountUninit || account.Status == tlb.AccountNone {
+		return true
+	}
+	for _, i := range account.Interfaces {
+		if i.Implements(abi.Wallet) {
+			return true
+		}
+	}
+	return false
 }

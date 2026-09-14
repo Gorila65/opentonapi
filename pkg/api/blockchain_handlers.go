@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,15 +9,11 @@ import (
 	"net/http"
 	"sort"
 
-	"golang.org/x/exp/maps"
-
-	"github.com/tonkeeper/tongo/contract/elector"
-	"github.com/tonkeeper/tongo/tvm"
-
 	"github.com/tonkeeper/opentonapi/internal/g"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
 	"github.com/tonkeeper/tongo"
+	abiElector "github.com/tonkeeper/tongo/abi-tolk/abiGenerated/elector"
 	"github.com/tonkeeper/tongo/boc"
 	"github.com/tonkeeper/tongo/tlb"
 	"github.com/tonkeeper/tongo/ton"
@@ -72,6 +69,25 @@ func (h *Handler) GetBlockchainBlock(ctx context.Context, params oas.GetBlockcha
 	return &res, nil
 }
 
+func (h *Handler) DownloadBlockchainBlockBoc(ctx context.Context, params oas.DownloadBlockchainBlockBocParams) (*oas.DownloadBlockchainBlockBocOKHeaders, error) {
+	blockID, err := ton.ParseBlockID(params.BlockID)
+	if err != nil {
+		return nil, toError(http.StatusBadRequest, err)
+	}
+
+	bocBytes, err := h.storage.GetBlockchainBlock(ctx, blockID)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+
+	return &oas.DownloadBlockchainBlockBocOKHeaders{
+		ContentDisposition: oas.NewOptString(fmt.Sprintf(`attachment; filename="block_%s.boc"`, params.BlockID)),
+		Response: oas.DownloadBlockchainBlockBocOK{
+			Data: bytes.NewReader(bocBytes),
+		},
+	}, nil
+}
+
 func (h *Handler) GetBlockchainMasterchainShards(ctx context.Context, params oas.GetBlockchainMasterchainShardsParams) (r *oas.BlockchainBlockShards, _ error) {
 	shards, err := h.storage.GetBlockShards(ctx, ton.BlockID{Shard: 0x8000000000000000, Seqno: uint32(params.MasterchainSeqno), Workchain: -1})
 	if errors.Is(err, core.ErrEntityNotFound) {
@@ -97,71 +113,15 @@ func (h *Handler) GetBlockchainMasterchainShards(ctx context.Context, params oas
 	return &res, nil
 }
 
-func (h *Handler) blocksDiff(ctx context.Context, masterchainSeqno int32) ([]ton.BlockID, error) {
-	shards, err := h.storage.GetBlockShards(ctx, ton.BlockID{Shard: 0x8000000000000000, Seqno: uint32(masterchainSeqno), Workchain: -1})
-	if errors.Is(err, core.ErrEntityNotFound) {
-		return nil, toError(http.StatusNotFound, err)
-	}
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	prevShards, err := h.storage.GetBlockShards(ctx, ton.BlockID{Shard: 0x8000000000000000, Seqno: uint32(masterchainSeqno) - 1, Workchain: -1})
-	if errors.Is(err, core.ErrEntityNotFound) {
-		return nil, toError(http.StatusNotFound, err)
-	}
-	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
-	}
-	blocks := []ton.BlockID{{Shard: 0x8000000000000000, Seqno: uint32(masterchainSeqno), Workchain: -1}}
-
-	for _, s := range shards {
-		missedBlocks, err := findMissedBlocks(ctx, h.storage, s, prevShards)
-		if err != nil {
-			return nil, err
-		}
-		blocks = append(blocks, missedBlocks...)
-	}
-
-	return blocks, nil
-}
-
-func findMissedBlocks(ctx context.Context, s storage, id ton.BlockID, prev []ton.BlockID) ([]ton.BlockID, error) {
-	for _, p := range prev {
-		if id.Shard == p.Shard && id.Workchain == p.Workchain {
-			blocks := make([]ton.BlockID, 0, int(id.Seqno-p.Seqno))
-			for i := p.Seqno + 1; i <= id.Seqno; i++ {
-				blocks = append(blocks, ton.BlockID{Workchain: p.Workchain, Shard: p.Shard, Seqno: i})
-			}
-			return blocks, nil
-		}
-	}
-	blocks := []ton.BlockID{id}
-	header, err := s.GetBlockHeader(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range header.PrevBlocks {
-		missed, err := findMissedBlocks(ctx, s, p.BlockID, prev)
-		if err != nil {
-			return nil, err
-		}
-		blocks = append(blocks, missed...)
-	}
-	uniq := make(map[ton.BlockID]struct{}, len(blocks))
-	for i := range blocks {
-		uniq[blocks[i]] = struct{}{}
-	}
-	if len(blocks) == len(uniq) {
-		return blocks, nil
-	}
-	return maps.Keys(uniq), nil
-}
-
 func (h *Handler) GetBlockchainMasterchainBlocks(ctx context.Context, params oas.GetBlockchainMasterchainBlocksParams) (*oas.BlockchainBlocks, error) {
-	blockIDs, err := h.blocksDiff(ctx, params.MasterchainSeqno)
+	blockIDs, err := h.storage.GetBlockIDsForMasterchain(ctx, uint32(params.MasterchainSeqno))
 	if err != nil {
-		return nil, err
+		return nil, toError(http.StatusInternalServerError, err)
 	}
+	if len(blockIDs) == 0 {
+		return nil, toError(http.StatusNotFound, fmt.Errorf("no blocks found for masterchain seqno %d", params.MasterchainSeqno))
+	}
+
 	result := oas.BlockchainBlocks{
 		Blocks: make([]oas.BlockchainBlock, len(blockIDs)),
 	}
@@ -179,10 +139,14 @@ func (h *Handler) GetBlockchainMasterchainBlocks(ctx context.Context, params oas
 }
 
 func (h *Handler) GetBlockchainMasterchainTransactions(ctx context.Context, params oas.GetBlockchainMasterchainTransactionsParams) (*oas.Transactions, error) {
-	blockIDs, err := h.blocksDiff(ctx, params.MasterchainSeqno)
+	blockIDs, err := h.storage.GetBlockIDsForMasterchain(ctx, uint32(params.MasterchainSeqno))
 	if err != nil {
-		return nil, err
+		return nil, toError(http.StatusInternalServerError, err)
 	}
+	if len(blockIDs) == 0 {
+		return nil, toError(http.StatusNotFound, fmt.Errorf("no blocks found for masterchain seqno %d", params.MasterchainSeqno))
+	}
+
 	var result oas.Transactions
 	for _, id := range blockIDs {
 		txs, err := h.storage.GetBlockTransactions(ctx, id)
@@ -193,12 +157,18 @@ func (h *Handler) GetBlockchainMasterchainTransactions(ctx context.Context, para
 			return nil, toError(http.StatusInternalServerError, err)
 		}
 		for _, tx := range txs {
-			result.Transactions = append(result.Transactions, convertTransaction(*tx, nil, h.addressBook))
+			result.Transactions = append(result.Transactions, h.convertTransaction(*tx, nil, h.addressBook))
 		}
 	}
 	sort.Slice(result.Transactions, func(i, j int) bool {
 		return result.Transactions[i].Lt < result.Transactions[j].Lt
 	})
+	if params.Offset.Value > 0 {
+		result.Transactions = result.Transactions[min(len(result.Transactions), params.Offset.Value):]
+	}
+	if params.Limit.Value > 0 {
+		result.Transactions = result.Transactions[:min(len(result.Transactions), params.Limit.Value)]
+	}
 	return &result, nil
 }
 
@@ -218,7 +188,7 @@ func (h *Handler) GetBlockchainBlockTransactions(ctx context.Context, params oas
 		Transactions: make([]oas.Transaction, 0, len(transactions)),
 	}
 	for _, tx := range transactions {
-		res.Transactions = append(res.Transactions, convertTransaction(*tx, nil, h.addressBook))
+		res.Transactions = append(res.Transactions, h.convertTransaction(*tx, nil, h.addressBook))
 	}
 	sort.Slice(res.Transactions, func(i, j int) bool {
 		return res.Transactions[i].Lt < res.Transactions[j].Lt
@@ -249,7 +219,7 @@ func (h *Handler) GetBlockchainTransaction(ctx context.Context, params oas.GetBl
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	transaction := convertTransaction(*txs, nil, h.addressBook)
+	transaction := h.convertTransaction(*txs, nil, h.addressBook)
 	return &transaction, nil
 }
 
@@ -270,7 +240,7 @@ func (h *Handler) GetBlockchainTransactionByMessageHash(ctx context.Context, par
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}
-	transaction := convertTransaction(*txs, nil, h.addressBook)
+	transaction := h.convertTransaction(*txs, nil, h.addressBook)
 	return &transaction, nil
 }
 
@@ -437,24 +407,10 @@ func (h *Handler) GetBlockchainValidators(ctx context.Context) (*oas.Validators,
 			return nil, toError(http.StatusInternalServerError, err)
 		}
 		init := acc.Account.Storage.State.AccountActive.StateInit
-		code := init.Code.Value.Value
 		data := init.Data.Value.Value
 
-		configObject := h.configPool.Get().(*tvm.Config)
-		defer h.configPool.Put(configObject)
-		if configObject == nil {
-			return nil, toError(http.StatusInternalServerError, fmt.Errorf("error getting BlockchainConfig from the pool"))
-		}
-
-		emulator, err := tvm.NewEmulator(&code, &data, nil, tvm.WithConfig(configObject))
-		if err != nil {
-			return nil, toError(http.StatusInternalServerError, err)
-		}
-		if err := emulator.SetGasLimit(10_000_000); err != nil {
-			return nil, toError(http.StatusInternalServerError, err)
-		}
-		list, err := elector.GetParticipantListExtended(ctx, electorAddr, emulator)
-		if err != nil {
+		var electorStorage abiElector.ElectorStorage
+		if err = electorStorage.UnmarshalTLB(&data, tlb.NewDecoder()); err != nil {
 			return nil, toError(http.StatusInternalServerError, err)
 		}
 		if config.ConfigParam34 == nil {
@@ -462,47 +418,56 @@ func (h *Handler) GetBlockchainValidators(ctx context.Context) (*oas.Validators,
 		}
 
 		validatorSet := config.ConfigParam34.CurValidators
-		var pubKeys map[tlb.Bits256]struct{}
+		var pubKeys map[string]struct{}
 		var utimeSince uint32
 		switch validatorSet.SumType {
 		case "Validators":
 			utimeSince = validatorSet.Validators.UtimeSince
-			pubKeys = make(map[tlb.Bits256]struct{}, len(validatorSet.Validators.List.Keys()))
+			pubKeys = make(map[string]struct{}, len(validatorSet.Validators.List.Keys()))
 			for _, descr := range validatorSet.Validators.List.Values() {
-				pubKeys[descr.PubKey()] = struct{}{}
+				pubKeys[descr.PubKey().Hex()] = struct{}{}
 			}
 		case "ValidatorsExt":
 			utimeSince = validatorSet.ValidatorsExt.UtimeSince
-			pubKeys = make(map[tlb.Bits256]struct{}, len(validatorSet.ValidatorsExt.List.Keys()))
+			pubKeys = make(map[string]struct{}, len(validatorSet.ValidatorsExt.List.Keys()))
 			for _, descr := range validatorSet.ValidatorsExt.List.Values() {
-				pubKeys[descr.PubKey()] = struct{}{}
+				pubKeys[descr.PubKey().Hex()] = struct{}{}
 			}
 		default:
 			return nil, toError(http.StatusInternalServerError, fmt.Errorf("unknown validator set type %v", validatorSet.SumType))
 		}
-		if list.ElectAt != int64(utimeSince) {
+
+		if !electorStorage.Elect.Exists || electorStorage.Elect.Value.Value == nil {
+			continue
+		}
+		elect := electorStorage.Elect.Value.Value
+		if uint32(elect.ElectAt) != utimeSince {
 			// this election is for the next validator set,
 			// let's take travel back in time to the current validator set
 			continue
 		}
+		electMembers := elect.Members.Items()
 		validators := &oas.Validators{
-			ElectAt:    list.ElectAt,
-			ElectClose: list.ElectClose,
-			MinStake:   list.MinStake,
-			TotalStake: list.TotalStake,
-			Validators: make([]oas.Validator, 0, len(list.Validators)),
+			ElectAt:    int64(elect.ElectAt),
+			ElectClose: int64(elect.ElectClose),
+			MinStake:   int64(elect.MinStake),
+			TotalStake: int64(elect.TotalStake),
+			Validators: make([]oas.Validator, 0, len(electMembers)),
 		}
-		for _, v := range list.Validators {
+		for _, item := range electMembers {
+			pubkey := item.Key
+			v := item.Value
 			// sometimes, participant_list_extended returns validators that are not in the current validator set,
 			// so we need to filter them out.
-			if _, ok := pubKeys[v.Pubkey]; !ok {
+			if _, ok := pubKeys[pubkey.HexString()]; !ok {
 				continue
 			}
+			address := ton.AccountID{Workchain: -1, Address: v.SrcAddr.ToBits()}
 			validators.Validators = append(validators.Validators, oas.Validator{
-				Stake:       v.Stake,
-				MaxFactor:   v.MaxFactor,
-				Address:     v.Address.ToRaw(),
-				AdnlAddress: v.AdnlAddr,
+				Stake:       int64(v.Stake),
+				MaxFactor:   int64(v.MaxFactor),
+				Address:     address.ToRaw(),
+				AdnlAddress: v.AdnlAddr.HexString(),
 			})
 		}
 		return validators, nil

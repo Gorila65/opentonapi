@@ -3,6 +3,10 @@ package core
 import (
 	"math/big"
 
+	"github.com/tonkeeper/tongo/abi"
+	"github.com/tonkeeper/tongo/tep64"
+	"github.com/tonkeeper/tongo/ton"
+
 	"github.com/shopspring/decimal"
 	"github.com/tonkeeper/tongo"
 )
@@ -21,19 +25,80 @@ type JettonWallet struct {
 type JettonHolder struct {
 	JettonAddress tongo.AccountID
 	Address       tongo.AccountID
-	Owner         tongo.AccountID
+	Owner         *tongo.AccountID
+	OwnerIsWallet bool
 	Balance       decimal.Decimal
+}
+
+type JettonMasterRich struct {
+	Metadata   tep64.Metadata
+	Interfaces []abi.ContractInterface
+	ScaledUI   *ScaledUIParameters
 }
 
 type JettonMaster struct {
 	// Address of a jetton master.
-	Address     tongo.AccountID
-	TotalSupply big.Int
-	Mintable    bool
-	Admin       *tongo.AccountID
+	Address           tongo.AccountID
+	TotalSupply       big.Int
+	Mintable          bool
+	Admin             *tongo.AccountID
+	CodeHash          string
+	DataHash          string
+	LastTransactionLt uint64
+	// Enriched might be populated to avoid N+1 db lookups (atm the GetJettonMasters does it)
+	Enriched *JettonMasterRich
 }
 
 type JettonWalletLockData struct {
 	FullBalance decimal.Decimal
 	UnlockTime  int64
+}
+
+type JettonOperationType = string
+
+const (
+	TransferJettonOperation JettonOperationType = "transfer"
+	MintJettonOperation     JettonOperationType = "mint"
+	BurnJettonOperation     JettonOperationType = "burn"
+	UnknownJettonOperation  JettonOperationType = "unknown"
+)
+
+type JettonOperation struct {
+	Operation      JettonOperationType
+	Source         *tongo.AccountID
+	Destination    *tongo.AccountID
+	JettonMaster   tongo.AccountID
+	TraceID        ton.Bits256
+	TxID           ton.Bits256
+	DestEndBalance decimal.Decimal
+	Amount         decimal.Decimal
+	QueryID        uint64
+	ForwardPayload abi.JettonPayload
+	Lt             uint64
+	Utime          int64
+}
+
+type NftOperationType = string
+
+const (
+	TransferNftOperation NftOperationType = "transfer"
+	MintNftOperation     NftOperationType = "mint"
+	BurnNftOperation     NftOperationType = "burn"
+	UnknownNftOperation  NftOperationType = "unknown"
+)
+
+type NftOperation struct {
+	Operation      NftOperationType
+	Source         *tongo.AccountID
+	Destination    *tongo.AccountID
+	Nft            tongo.AccountID
+	TxID           ton.Bits256
+	ForwardPayload abi.NFTPayload
+	Lt             uint64
+	Utime          int64
+}
+
+type ScaledUIParameters struct {
+	Numerator   decimal.Decimal
+	Denominator decimal.Decimal
 }

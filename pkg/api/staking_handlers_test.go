@@ -2,7 +2,12 @@ package api
 
 import (
 	"context"
+	"os"
 	"testing"
+
+	"github.com/tonkeeper/opentonapi/pkg/addressbook"
+	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/tongo"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tonkeeper/opentonapi/pkg/litestorage"
@@ -12,6 +17,10 @@ import (
 )
 
 func TestHandler_GetStakingPoolInfo(t *testing.T) {
+	if os.Getenv("TEST_CI") == "1" {
+		t.SkipNow()
+		return
+	}
 	tests := []struct {
 		name     string
 		params   oas.GetStakingPoolInfoParams
@@ -33,9 +42,14 @@ func TestHandler_GetStakingPoolInfo(t *testing.T) {
 			logger := zap.L()
 			cli, err := liteapi.NewClient(liteapi.FromEnvsOrMainnet())
 			require.Nil(t, err)
-			liteStorage, err := litestorage.NewLiteStorage(logger, cli)
+			liteStorage, err := litestorage.NewLiteStorage(logger, core.LiteAPIClient(cli))
 			require.Nil(t, err)
-			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage))
+			book := &mockAddressBook{
+				OnGetAddressInfoByAddress: func(a tongo.AccountID) (addressbook.KnownAddress, bool) {
+					return addressbook.KnownAddress{}, false
+				},
+			}
+			h, err := NewHandler(logger, WithStorage(liteStorage), WithExecutor(liteStorage), WithAddressBook(book))
 			require.Nil(t, err)
 			info, err := h.GetStakingPoolInfo(context.Background(), tt.params)
 			if tt.wantErr {

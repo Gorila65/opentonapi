@@ -10,14 +10,14 @@ on:
 
 jobs:
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v3
       - name: Go Version
         uses: actions/setup-go@v3
         with:
-          go-version: '1.22'
+          go-version: '1.23'
       - name: test
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/libs
@@ -26,4 +26,4 @@ jobs:
           sudo apt-get install -y libsecp256k1-0
           mkdir -p ${{ env.LD_LIBRARY_PATH}}
           wget https://github.com/tonkeeper/tongo/raw/master/lib/linux/libemulator.so -O ${{ env.LD_LIBRARY_PATH}}/libemulator.so
-          make test
+          make test-ci

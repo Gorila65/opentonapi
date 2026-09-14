@@ -3,12 +3,16 @@ package litestorage
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 	"sync"
 	"time"
+
+	"maps"
 
 	"github.com/avast/retry-go"
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,15 +22,16 @@ import (
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/boc"
-	"github.com/tonkeeper/tongo/liteapi"
 	"github.com/tonkeeper/tongo/tep64"
 	"github.com/tonkeeper/tongo/tlb"
 	"github.com/tonkeeper/tongo/ton"
+	"github.com/tonkeeper/tongo/wallet"
 	"go.uber.org/zap"
 
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
 	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/opentonapi/pkg/core"
+	"github.com/tonkeeper/opentonapi/pkg/pyth"
 )
 
 var storageTimeHistogramVec = promauto.NewHistogramVec(
@@ -51,9 +56,13 @@ func extractInMsgCreatedLT(accountID tongo.AccountID, tx *tlb.Transaction) (inMs
 	return inMsgCreatedLT{}, false
 }
 
+type PriceFeeds interface {
+	GetFeed(id string) (pyth.PriceFeedAttributes, bool)
+}
+
 type LiteStorage struct {
 	logger                  *zap.Logger
-	client                  *liteapi.Client
+	client                  core.LiteClient
 	executor                abi.Executor
 	jettonMetaCache         *xsync.MapOf[string, tep64.Metadata]
 	transactionsIndexByHash *xsync.MapOf[tongo.Bits256, *core.Transaction]
@@ -67,9 +76,8 @@ type LiteStorage struct {
 	// maxGoroutines specifies a number of goroutines used to perform some time-consuming operations.
 	maxGoroutines int
 	// trackingAccounts is a list of accounts we track. Defined with ACCOUNTS env variable.
-	trackingAccounts  map[tongo.AccountID]struct{}
-	pubKeyByAccountID *xsync.MapOf[tongo.AccountID, ed25519.PublicKey]
-	configCache       cache.Cache[int, ton.BlockchainConfig]
+	trackingAccounts map[tongo.AccountID]struct{}
+	configCache      cache.Cache[int, ton.BlockchainConfig]
 
 	stopCh chan struct{}
 	// mu protects trimmedConfigBase64.
@@ -78,6 +86,16 @@ type LiteStorage struct {
 	// it's performance optimization.
 	// tmv and txEmulator work much faster with a smaller config.
 	trimmedConfigBase64 string
+
+	pythPriceFeeds PriceFeeds
+}
+
+func (s *LiteStorage) GetPythPriceFeedMeta(id string) (pyth.PriceFeedAttributes, bool) {
+	feeds := s.pythPriceFeeds
+	if feeds == nil {
+		return pyth.PriceFeedAttributes{}, false
+	}
+	return feeds.GetFeed(id)
 }
 
 type Options struct {
@@ -87,7 +105,14 @@ type Options struct {
 	jettons         []tongo.AccountID
 	executor        abi.Executor
 	// blockCh is used to receive new blocks in the blockchain, if set.
-	blockCh <-chan indexer.IDandBlock
+	blockCh        <-chan indexer.IDandBlock
+	pythPriceFeeds PriceFeeds
+}
+
+func WithPythPriceFeeds(feeds PriceFeeds) Option {
+	return func(o *Options) {
+		o.pythPriceFeeds = feeds
+	}
 }
 
 func WithPreloadAccounts(a []tongo.AccountID) Option {
@@ -123,7 +148,7 @@ func WithBlockChannel(ch <-chan indexer.IDandBlock) Option {
 
 type Option func(o *Options)
 
-func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*LiteStorage, error) {
+func NewLiteStorage(log *zap.Logger, cli core.LiteClient, opts ...Option) (*LiteStorage, error) {
 	o := &Options{}
 	for i := range opts {
 		opts[i](o)
@@ -148,9 +173,9 @@ func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*Lite
 		transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
 		blockCache:              xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](hashBlockIDExt),
 		accountInterfacesCache:  xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
-		pubKeyByAccountID:       xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
 		tvmLibraryCache:         cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
 		configCache:             cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
+		pythPriceFeeds:          o.pythPriceFeeds,
 	}
 	storage.knownAccounts["tf_pools"] = o.tfPools
 	storage.knownAccounts["jettons"] = o.jettons
@@ -220,7 +245,7 @@ func (s *LiteStorage) GetContract(ctx context.Context, id tongo.AccountID) (*cor
 		return nil, err
 	}
 	return &core.Contract{
-		Balance:           account.TonBalance,
+		Balance:           account.GramBalance,
 		Status:            account.Status,
 		Code:              account.Code,
 		Data:              account.Data,
@@ -317,6 +342,7 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 		return err
 	}
 	s.blockCache.Store(extID, &block)
+	errs := []error{}
 	for _, tx := range block.AllTransactions() {
 		accountID := tongo.AccountID{
 			Workchain: extID.Workchain,
@@ -325,12 +351,18 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 		inspector := abi.NewContractInspector(abi.InspectWithLibraryResolver(s))
 		account, err := s.GetRawAccount(ctx, accountID)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		cd, err := inspector.InspectContract(ctx, account.Code, s.executor, accountID)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		t, err := core.ConvertTransaction(extID.Workchain, tongo.Transaction{Transaction: *tx, BlockID: extID}, cd)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		hash := tongo.Bits256(tx.Hash())
 		s.transactionsIndexByHash.Store(hash, t)
@@ -338,7 +370,7 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 			s.transactionsByInMsgLT.Store(createLT, hash)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (s *LiteStorage) GetBlockHeader(ctx context.Context, id tongo.BlockID) (*core.BlockHeader, error) {
@@ -524,11 +556,50 @@ func (s *LiteStorage) GetWalletPubKey(ctx context.Context, address tongo.Account
 			return append(make([]byte, 32-len(b)), b...), nil
 		}
 	}
-	pubKey, ok := s.pubKeyByAccountID.Load(address)
-	if ok {
-		return pubKey, nil
-	}
 	return nil, fmt.Errorf("can't get public key")
+}
+
+var SupportedWallets = map[wallet.Version]abi.ContractInterface{
+	wallet.V1R1:   abi.WalletV1R1,
+	wallet.V1R2:   abi.WalletV1R2,
+	wallet.V1R3:   abi.WalletV1R3,
+	wallet.V2R1:   abi.WalletV2R1,
+	wallet.V2R2:   abi.WalletV2R2,
+	wallet.V3R1:   abi.WalletV3R1,
+	wallet.V3R2:   abi.WalletV3R2,
+	wallet.V4R1:   abi.WalletV4R1,
+	wallet.V4R2:   abi.WalletV4R2,
+	wallet.V5Beta: abi.WalletV5Beta,
+	wallet.V5R1:   abi.WalletV5R1,
+}
+
+func (s *LiteStorage) GetWalletAddressesByPubkey(ctx context.Context, pubKey ed25519.PublicKey) (map[ton.AccountID]abi.ContractInterface, error) {
+	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
+		storageTimeHistogramVec.WithLabelValues("get_wallet_addresses_by_pubkey").Observe(v)
+	}))
+	defer timer.ObserveDuration()
+
+	wallets := make(map[ton.AccountID]abi.ContractInterface, len(SupportedWallets))
+	for version, ifc := range SupportedWallets {
+		walletAddress, err := wallet.GenerateWalletAddress(pubKey, version, nil, 0, nil)
+		if err != nil {
+			continue
+		}
+		wallets[walletAddress] = ifc
+	}
+	return wallets, nil
+}
+
+func (s *LiteStorage) GetWalletAddressesByPubkeys(ctx context.Context, pubKeys []ed25519.PublicKey) (map[string]map[ton.AccountID]abi.ContractInterface, error) {
+	result := make(map[string]map[ton.AccountID]abi.ContractInterface, len(pubKeys))
+	for _, pubKey := range pubKeys {
+		wallets, err := s.GetWalletAddressesByPubkey(ctx, pubKey)
+		if err != nil {
+			return nil, err
+		}
+		result[hex.EncodeToString(pubKey)] = wallets
+	}
+	return result, nil
 }
 
 func (s *LiteStorage) ReindexAccount(ctx context.Context, accountID tongo.AccountID) error {
@@ -547,14 +618,6 @@ func (s *LiteStorage) GetDnsExpiring(ctx context.Context, id tongo.AccountID, pe
 	return nil, nil
 }
 
-func (c *LiteStorage) GetInscriptionBalancesByAccount(ctx context.Context, a ton.AccountID) ([]core.InscriptionBalance, error) {
-	return nil, fmt.Errorf("not implemented") //and cannot be without full blockckchain index
-}
-
-func (c *LiteStorage) GetInscriptionsHistoryByAccount(ctx context.Context, a ton.AccountID, ticker *string, beforeLt int64, limit int) ([]core.InscriptionMessage, error) {
-	return nil, fmt.Errorf("not implemented") //and cannot be without full blockckchain index
-}
-
 func (s *LiteStorage) GetReducedBlocks(ctx context.Context, from, to int64) ([]core.ReducedBlock, error) {
 	return nil, fmt.Errorf("not implemented")
 }
@@ -565,4 +628,120 @@ func (s *LiteStorage) GetAccountMultisigs(ctx context.Context, accountID ton.Acc
 
 func (s *LiteStorage) GetMultisigByID(ctx context.Context, accountID ton.AccountID) (*core.Multisig, error) {
 	return nil, fmt.Errorf("not implemented")
+}
+func (s *LiteStorage) GetMultisigOrderByID(ctx context.Context, accountID ton.AccountID) (*core.MultisigOrder, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (s *LiteStorage) SaveTraceWithState(ctx context.Context, msgHash string, trace *core.Trace, version int, getMethods []abi.MethodInvocation, ttl time.Duration) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (s *LiteStorage) GetTraceWithState(ctx context.Context, msgHash string) (*core.Trace, int, []abi.MethodInvocation, error) {
+	return nil, 0, nil, fmt.Errorf("not implemented")
+}
+
+func (s *LiteStorage) SaveEmulationError(ctx context.Context, msg *boc.Cell, msgHash string, err error) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (s *LiteStorage) GetBlockchainBlock(ctx context.Context, id ton.BlockID) ([]byte, error) {
+	idExt, _, err := s.client.LookupBlock(ctx, id, 1, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	block, err := s.client.GetBlockRaw(ctx, idExt)
+	if err != nil {
+		return nil, err
+	}
+	return block.Data, nil
+}
+
+func (s *LiteStorage) GetBlockIDsForMasterchain(ctx context.Context, masterSeqno uint32) ([]ton.BlockID, error) {
+	master := ton.BlockID{Workchain: -1, Shard: 0x8000000000000000, Seqno: masterSeqno}
+	masterBlockID, _, err := s.client.LookupBlock(ctx, master, 1, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup master block: %w", err)
+	}
+
+	currShardsInfo, err := s.client.GetAllShardsInfo(ctx, masterBlockID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get shards for master %d: %w", masterSeqno, err)
+	}
+
+	prev := ton.BlockID{Workchain: -1, Shard: 0x8000000000000000, Seqno: masterSeqno - 1}
+	prevBlockID, _, err := s.client.LookupBlock(ctx, prev, 1, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup previous master block: %w", err)
+	}
+
+	prevShardsInfo, err := s.client.GetAllShardsInfo(ctx, prevBlockID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get shards for master %d: %w", masterSeqno-1, err)
+	}
+
+	return s.diffFromShards(ctx, masterBlockID.BlockID, currShardsInfo, prevShardsInfo)
+}
+
+func (s *LiteStorage) diffFromShards(ctx context.Context, master ton.BlockID, curr []ton.BlockIDExt, prev []ton.BlockIDExt) ([]ton.BlockID, error) {
+	blocks := []ton.BlockID{master}
+
+	prevShards := make([]ton.BlockID, 0, len(prev))
+	for _, p := range prev {
+		prevShards = append(prevShards, p.BlockID)
+	}
+
+	for _, shard := range curr {
+		missed, err := findMissedBlocks(ctx, s, shard.BlockID, prevShards)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, missed...)
+	}
+
+	uniq := make(map[ton.BlockID]struct{}, len(blocks))
+	result := make([]ton.BlockID, 0, len(blocks))
+	for _, b := range blocks {
+		if _, ok := uniq[b]; !ok {
+			uniq[b] = struct{}{}
+			result = append(result, b)
+		}
+	}
+	return result, nil
+}
+
+func findMissedBlocks(ctx context.Context, s *LiteStorage, id ton.BlockID, prev []ton.BlockID) ([]ton.BlockID, error) {
+	for _, p := range prev {
+		if id.Shard == p.Shard && id.Workchain == p.Workchain {
+			blocks := make([]ton.BlockID, 0, int(id.Seqno-p.Seqno))
+			for i := p.Seqno + 1; i <= id.Seqno; i++ {
+				blocks = append(blocks, ton.BlockID{
+					Workchain: p.Workchain,
+					Shard:     p.Shard,
+					Seqno:     i,
+				})
+			}
+			return blocks, nil
+		}
+	}
+
+	var result []ton.BlockID
+	result = append(result, id)
+
+	header, err := s.GetBlockHeader(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range header.PrevBlocks {
+		missed, err := findMissedBlocks(ctx, s, p.BlockID, prev)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, missed...)
+	}
+	uniq := make(map[ton.BlockID]struct{}, len(result))
+	for _, b := range result {
+		uniq[b] = struct{}{}
+	}
+	return slices.Collect(maps.Keys(uniq)), nil
 }

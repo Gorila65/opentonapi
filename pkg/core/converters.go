@@ -312,13 +312,14 @@ func ConvertMessage(message tlb.Message, txLT uint64, cd *abi.ContractDescriptio
 		if err != nil {
 			return Message{}, err
 		}
-
+		ihrFee := big.Int(info.IhrFee)
 		return Message{
 			MessageID: MessageID{
 				CreatedLt:   info.CreatedLt,
 				Source:      source,
 				Destination: dest,
 			},
+			Hash:        ton.Bits256(message.Hash(false)),
 			MsgType:     IntMsg,
 			IhrDisabled: info.IhrDisabled,
 			Bounce:      info.Bounce,
@@ -326,7 +327,7 @@ func ConvertMessage(message tlb.Message, txLT uint64, cd *abi.ContractDescriptio
 			Value:       int64(info.Value.Grams),
 			ValueExtra:  extractExtraCurrencies(info.Value.Other),
 			FwdFee:      int64(info.FwdFee),
-			IhrFee:      int64(info.IhrFee),
+			IhrFee:      ihrFee.Int64(),
 			ImportFee:   0,
 			Init:        init,
 			Body:        body,
@@ -383,6 +384,7 @@ func ConvertMessage(message tlb.Message, txLT uint64, cd *abi.ContractDescriptio
 				Source:    source,
 			},
 			MsgType:           ExtOutMsg,
+			Hash:              ton.Bits256(message.Hash(false)),
 			DestinationExtern: externalAddressFromTlb(info.Dest),
 			Body:              body,
 			DecodedBody:       decodedBody,
@@ -434,7 +436,7 @@ func ConvertToAccount(accountId tongo.AccountID, shardAccount tlb.ShardAccount) 
 		}
 	}
 	balance := acc.Account.Storage.Balance
-	res.TonBalance = int64(balance.Grams)
+	res.GramBalance = int64(balance.Grams)
 	res.ExtraBalances = extractExtraCurrencies(balance.Other)
 	res.LastTransactionLt = shardAccount.LastTransLt
 	res.LastTransactionHash = tongo.Bits256(shardAccount.LastTransHash)
@@ -466,7 +468,7 @@ func ConvertToAccount(accountId tongo.AccountID, shardAccount tlb.ShardAccount) 
 		LastPaid:        acc.Account.StorageStat.LastPaid,
 		UsedCells:       big.Int(acc.Account.StorageStat.Used.Cells),
 		UsedBits:        big.Int(acc.Account.StorageStat.Used.Bits),
-		UsedPublicCells: big.Int(acc.Account.StorageStat.Used.PublicCells),
+		UsedPublicCells: *big.NewInt(0), // not supported now
 	}
 	if acc.Account.StorageStat.DuePayment.Exists {
 		res.Storage.DuePayment = int64(acc.Account.StorageStat.DuePayment.Value)
@@ -500,12 +502,12 @@ func ExtractTransactions(id tongo.BlockIDExt, block *tlb.Block) ([]*Transaction,
 }
 
 func ConvertToCurrencyCollection(collection tlb.CurrencyCollection) CurrencyCollection {
-	var other []Currency
+	var other []ExtraCurrency
 	if len(collection.Other.Dict.Keys()) > 0 {
-		other = make([]Currency, 0, len(collection.Other.Dict.Items()))
+		other = make([]ExtraCurrency, 0, len(collection.Other.Dict.Items()))
 		for _, item := range collection.Other.Dict.Items() {
 			value := big.Int(item.Value)
-			other = append(other, Currency{
+			other = append(other, ExtraCurrency{
 				ID:    int64(item.Key),
 				Value: value.String(),
 			})

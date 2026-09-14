@@ -15,13 +15,15 @@ import (
 	"github.com/tonkeeper/tongo/tlb"
 
 	"github.com/tonkeeper/tongo"
-	"golang.org/x/exp/slices"
+	"slices"
 
 	"github.com/tonkeeper/opentonapi/pkg/api/i18n"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
 	"github.com/tonkeeper/opentonapi/pkg/references"
 )
+
+const tonstakersAPYMul = 76.02 // 100% - (validator & governance fee)
 
 func (h *Handler) GetStakingPoolInfo(ctx context.Context, params oas.GetStakingPoolInfoParams) (*oas.GetStakingPoolInfoOK, error) {
 	pool, err := tongo.ParseAddress(params.AccountID)
@@ -46,6 +48,10 @@ func (h *Handler) GetStakingPoolInfo(ctx context.Context, params oas.GetStakingP
 	if err == nil {
 		info, _ := h.addressBook.GetAddressInfoByAddress(lPool.Address)
 		lPool.Name = info.Name
+		switch pool.ID {
+		case references.TonstakersAccountPool:
+			lPool.APY = h.stats.GetAPY(tonstakersAPYMul)
+		}
 		config, err := h.storage.GetLastConfig(ctx)
 		if err != nil {
 			return nil, toError(http.StatusInternalServerError, err)
@@ -113,7 +119,8 @@ func (h *Handler) GetStakingPools(ctx context.Context, params oas.GetStakingPool
 	var minTF, minWhales int64
 	for _, p := range tfPools {
 		info, _ := h.addressBook.GetTFPoolInfo(p.Address)
-		pool := convertStakingTFPool(p, info, h.state.GetAPY())
+		apy := h.state.GetAPY()
+		pool := convertStakingTFPool(p, info, apy)
 		if minTF == 0 || pool.MinStake < minTF {
 			minTF = pool.MinStake
 		}
@@ -136,7 +143,8 @@ func (h *Handler) GetStakingPools(ctx context.Context, params oas.GetStakingPool
 		if err != nil {
 			continue
 		}
-		pool := convertStakingWhalesPool(k, w, poolStatus, poolConfig, h.state.GetAPY(), true, nominatorsCount, stake)
+		apy := h.state.GetAPY()
+		pool := convertStakingWhalesPool(k, w, poolStatus, poolConfig, apy, true, nominatorsCount, stake)
 		if minWhales == 0 || pool.MinStake < minWhales {
 			minWhales = pool.MinStake
 		}
@@ -164,6 +172,9 @@ func (h *Handler) GetStakingPools(ctx context.Context, params oas.GetStakingPool
 	for _, p := range liquidPools {
 		info, _ := h.addressBook.GetAddressInfoByAddress(p.Address)
 		p.Name = info.Name
+		if p.Address == references.TonstakersAccountPool {
+			p.APY = h.stats.GetAPY(tonstakersAPYMul)
+		}
 		result.Pools = append(result.Pools, convertLiquidStaking(p, cycleStart, cycleEnd))
 	}
 	slices.SortFunc(result.Pools, func(a, b oas.PoolInfo) int {
@@ -180,7 +191,7 @@ func (h *Handler) GetStakingPools(ctx context.Context, params oas.GetStakingPool
 			Name: references.WhalesPoolImplementationsName,
 			Description: i18n.T(params.AcceptLanguage.Value, i18n.C{DefaultMessage: &i18n.M{
 				ID:    "poolImplementationDescription",
-				Other: "Minimum deposit {{.Deposit}} TON",
+				Other: "Minimum deposit {{.Deposit}} Gram",
 			}, TemplateData: i18n.Template{"Deposit": minWhales / 1_000_000_000}}),
 			URL: references.WhalesPoolImplementationsURL,
 		},
@@ -252,7 +263,7 @@ func convertStaking(w core.Nominator) oas.AccountStakingInfo {
 }
 
 func roundTons(amount int64) int64 {
-	if amount < int64(ton.OneTON) {
+	if amount < int64(ton.OneGRAM) {
 		return amount
 	}
 	return decimal.New(amount, 0).Round(-7).IntPart()
@@ -267,10 +278,19 @@ func (h *Handler) GetStakingPoolHistory(ctx context.Context, params oas.GetStaki
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
 	}
+	switch pool.ID {
+	case references.TonstakersAccountPool:
+		return h.stats.GetStakingPoolHistory(tonstakersAPYMul, int(params.Limit.Value))
+	}
 	logAddress := tlb.MsgAddress{SumType: "AddrExtern"}
 	addr := g.Must(boc.BitStringFromFiftHex("0000000000000000000000000000000000000000000000000000000000000003"))
 	logAddress.AddrExtern = &addr
-	logs, err := h.storage.GetLogs(ctx, pool.ID, &logAddress, 100, 0)
+	limit := int(params.Limit.Or(100))
+	var beforeLT uint64
+	if v, ok := params.BeforeLt.Get(); ok {
+		beforeLT = uint64(v)
+	}
+	logs, err := h.storage.GetLogs(ctx, pool.ID, &logAddress, limit, beforeLT)
 	if err != nil {
 		return nil, toError(http.StatusInternalServerError, err)
 	}

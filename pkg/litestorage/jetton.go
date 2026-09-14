@@ -2,9 +2,11 @@ package litestorage
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/shopspring/decimal"
@@ -16,7 +18,11 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 )
 
-func (s *LiteStorage) GetJettonWalletsByOwnerAddress(ctx context.Context, address ton.AccountID, jetton *ton.AccountID, isJettonMaster bool, mintless bool) ([]core.JettonWallet, error) {
+func (s *LiteStorage) GetJettonWalletsByOwnerAddresses(ctx context.Context, owners []ton.AccountID, mintless bool) ([]core.JettonWallet, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (s *LiteStorage) GetJettonWalletsByOwnerAddress(ctx context.Context, address ton.AccountID, jetton *ton.AccountID, isJettonMaster bool, mintless bool, limit, offset int) ([]core.JettonWallet, error) {
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
 		storageTimeHistogramVec.WithLabelValues("get_jetton_wallets_by_owner").Observe(v)
 	}))
@@ -24,6 +30,12 @@ func (s *LiteStorage) GetJettonWalletsByOwnerAddress(ctx context.Context, addres
 	jettons := s.knownAccounts["jettons"]
 	mapper := iter.Mapper[tongo.AccountID, *core.JettonWallet]{
 		MaxGoroutines: s.maxGoroutines,
+	}
+	if offset != 0 {
+		jettons = jettons[offset:]
+	}
+	if limit != 0 {
+		jettons = jettons[:min(limit, len(jettons))]
 	}
 	wallets, err := mapper.MapErr(jettons, func(jettonMaster *tongo.AccountID) (*core.JettonWallet, error) {
 		_, result, err := abi.GetWalletAddress(ctx, s.executor, *jettonMaster, address.ToMsgAddress())
@@ -113,11 +125,29 @@ func (s *LiteStorage) GetJettonMasterData(ctx context.Context, master tongo.Acco
 		TotalSupply: big.Int(r.TotalSupply),
 		Mintable:    r.Mintable,
 	}
-	jettonMaster.Admin, _ = tongo.AccountIDFromTlb(r.AdminAddress)
+	if r.AdminAddress != nil {
+		jettonMaster.Admin, _ = tongo.AccountIDFromTlb(*r.AdminAddress)
+	}
+	if state, err := s.client.GetAccountState(ctx, master); err == nil {
+		jettonMaster.LastTransactionLt = state.LastTransLt
+		if state.Account.SumType == "Account" && state.Account.Account.Storage.State.SumType == "AccountActive" {
+			stateInit := state.Account.Account.Storage.State.AccountActive.StateInit
+			if stateInit.Code.Exists {
+				if h, err := stateInit.Code.Value.Value.Hash(); err == nil {
+					jettonMaster.CodeHash = base64.StdEncoding.EncodeToString(h)
+				}
+			}
+			if stateInit.Data.Exists {
+				if h, err := stateInit.Data.Value.Value.Hash(); err == nil {
+					jettonMaster.DataHash = base64.StdEncoding.EncodeToString(h)
+				}
+			}
+		}
+	}
 	return jettonMaster, nil
 }
 
-func (s *LiteStorage) GetAccountJettonsHistory(ctx context.Context, address tongo.AccountID, limit int, beforeLT, startTime, endTime *int64) ([]tongo.Bits256, error) {
+func (s *LiteStorage) GetAccountJettonsHistory(ctx context.Context, address tongo.AccountID, limit int, beforeLT, startTime, endTime *int64) ([]core.JettonOperation, error) {
 	return nil, nil
 }
 
@@ -125,9 +155,17 @@ func (s *LiteStorage) GetAccountJettonHistoryByID(ctx context.Context, address, 
 	return nil, nil
 }
 
+func (s *LiteStorage) GetJettonAccountHistoryByID(ctx context.Context, address, jettonMaster tongo.AccountID, limit int, beforeLT, startTime, endTime *int64) ([]core.JettonOperation, error) {
+	return nil, nil
+}
+
 func (s *LiteStorage) JettonMastersForWallets(ctx context.Context, wallets []tongo.AccountID) (map[tongo.AccountID]tongo.AccountID, error) {
 	masters := make(map[tongo.AccountID]tongo.AccountID)
 	for _, wallet := range wallets {
+		// deduplicate wallets
+		if _, ok := masters[wallet]; ok {
+			continue
+		}
 		_, value, err := abi.GetWalletData(ctx, s.executor, wallet)
 		if err != nil {
 			return nil, err
@@ -147,7 +185,12 @@ func (s *LiteStorage) JettonMastersForWallets(ctx context.Context, wallets []ton
 	return masters, nil
 }
 
-func (s *LiteStorage) GetJettonMasters(ctx context.Context, limit, offset int) ([]core.JettonMaster, error) {
+func (s *LiteStorage) GetJettonMasters(ctx context.Context, limit int, lastAccountID *tongo.AccountID) ([]core.JettonMaster, error) {
+	// TODO: implement
+	return []core.JettonMaster{}, nil
+}
+
+func (s *LiteStorage) GetJettonMastersByOffset(ctx context.Context, limit, offset int) ([]core.JettonMaster, error) {
 	// TODO: implement
 	return []core.JettonMaster{}, nil
 }
@@ -160,6 +203,31 @@ func (s *LiteStorage) GetJettonsHoldersCount(ctx context.Context, accountIDs []t
 	return map[tongo.AccountID]int32{}, nil
 }
 
-func (s *LiteStorage) GetJettonHolders(ctx context.Context, jettonMaster tongo.AccountID, limit, offset int) ([]core.JettonHolder, error) {
+func (s *LiteStorage) GetJettonHoldersByBalance(ctx context.Context, jettonMaster tongo.AccountID, limit, offset int) ([]core.JettonHolder, error) {
 	return []core.JettonHolder{}, nil
+}
+
+func (s *LiteStorage) GetJettonHoldersByAddress(ctx context.Context, jettonMaster tongo.AccountID, limit int, lastAccountID *tongo.AccountID) ([]core.JettonHolder, error) {
+	return []core.JettonHolder{}, nil
+}
+
+func (s *LiteStorage) GetScaledUIParameters(ctx context.Context, master tongo.AccountID, beforeLt *int64) (*core.ScaledUIParameters, error) {
+	// return latest parameters instead of historical data
+	_, value, err := abi.GetDisplayMultiplier(ctx, s.executor, master)
+	if err != nil && (strings.Contains(err.Error(), "can not decode outputs") || strings.Contains(err.Error(), "method execution failed")) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	data, ok := value.(abi.GetDisplayMultiplierResult)
+	if !ok {
+		return nil, nil
+	}
+	numerator := big.Int(data.Numerator)
+	denominator := big.Int(data.Denominator)
+	res := core.ScaledUIParameters{
+		Numerator:   decimal.NewFromBigInt(&numerator, 0),
+		Denominator: decimal.NewFromBigInt(&denominator, 0),
+	}
+	return &res, nil
 }
